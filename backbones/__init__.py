@@ -1,0 +1,14 @@
+from backbones.baseline_single import SimpleConcatBaseline
+from backbones.baseline_simple_concat import SimpleConcatBaseline
+from backbones.our.model import MMNet
+from config import MAGNIFICATIONS
+
+def get_all_models(mags=MAGNIFICATIONS):
+    """Get all available models for experiments"""
+    models = {
+        'MMNet': MMNet(),
+        'SimpleConcat': SimpleConcatBaseline(),
+        'Single400X': SimpleConcatBaseline()
+    }
+    return models
+
