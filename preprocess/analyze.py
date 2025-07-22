@@ -67,3 +67,25 @@ def analyze_dataset():
 
     print("\nImages per Magnification per Class:\n", mag_class_df)
     print("\nTop Tumor Subtypes:\n", subtype_df.head(8))
+
+def patient_wise_mag_wise_image_count():
+    mag_counts = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+
+    for root, dirs, files in os.walk(SLIDES_PATH):
+        for file in files:
+            if not file.lower().endswith((".png", ".jpg", ".jpeg", ".tif")):
+                continue
+
+            path = os.path.join(root, file)
+            rel_path = path.replace(SLIDES_PATH, '')
+            parts = rel_path.strip(os.sep).split(os.sep)
+
+            if len(parts) < 6:
+                continue
+            benign_or_malignant = parts[0]
+            patient_id = parts[3]
+            magnification = parts[4]
+
+            mag_counts[benign_or_malignant][patient_id][magnification] += 1
+
+    return dict(mag_counts)

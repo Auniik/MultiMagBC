@@ -44,7 +44,11 @@ MMNet is a Multi-Magnification Network for breast cancer histopathology classifi
    - `ClinicalCrossMagFusion`: Cross-magnification fusion with attention
 
 3. **Data Pipeline**:
-   - `preprocess/multimagset.py`: Custom dataset class that samples one image per magnification per patient
+   - `preprocess/multimagset.py`: Enhanced dataset class with adaptive multi-image sampling per patient
+     - **Adaptive Sampling Strategy**: Low-volume patients (≤15 imgs/mag) use ~80% of images, medium-volume (16-30) ~60%, high-volume (>30) ~40%
+     - **Multi-Image Support**: Samples multiple image combinations per patient to maximize data utilization (~5-6x increase in samples per epoch)
+     - **Deterministic Sampling**: Uses epoch-based seeding for reproducible yet diverse sampling across epochs
+     - **Dynamic Batch Sizing**: Automatically adjusts batch sizes based on effective dataset size
    - `preprocess/kfold_splitter.py`: Patient-wise K-fold splitting to prevent data leakage
    - `preprocess/analyze.py`: Comprehensive dataset analysis and statistics
 
@@ -130,8 +134,10 @@ Best models are saved per fold as `output/fold_{i}_best.pth` based on balanced a
 The model processes 4 images simultaneously (one per magnification), which requires sufficient GPU memory. Batch sizes are automatically adjusted based on available hardware.
 
 ## Major Improvements
-- Implemented advanced multi-magnification attention mechanisms to learn hierarchical relationships between magnification levels
-- Developed patient-wise cross-validation strategy to prevent data leakage and ensure robust model evaluation
-- Introduced comprehensive overfitting detection and prevention techniques, including early stopping, gradient clipping, and advanced regularization
-- Enhanced data augmentation techniques to improve model generalization
-- Implemented focal loss with label smoothing for better handling of class imbalance
+- **Enhanced Multi-Image Sampling**: Implemented adaptive sampling strategy that increases data utilization from ~4% to ~20-25% per epoch, using multiple images per patient based on availability
+- **Advanced Multi-Magnification Attention**: Implemented hierarchical attention mechanisms to learn relationships between magnification levels
+- **Patient-Wise Cross-Validation**: Developed robust splitting strategy to prevent data leakage and ensure realistic model evaluation
+- **Overfitting Prevention**: Comprehensive detection and prevention techniques, including early stopping, gradient clipping, and advanced regularization
+- **Enhanced Data Augmentation**: Medical-specific transforms including elastic deformation, rotation, and color jittering
+- **Focal Loss Implementation**: Better handling of class imbalance with label smoothing and alpha weighting
+- **Dynamic Training Pipeline**: Automatic batch size adjustment and epoch-based sampling diversity for optimal resource utilization

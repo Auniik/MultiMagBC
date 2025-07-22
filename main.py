@@ -72,10 +72,25 @@ def main():
     for fold_idx, (train_pats, test_pats) in enumerate(splitter.folds):
         print(f"\n===== Fold {fold_idx} =====")
         print(f"Train patients: {len(train_pats)}, Test patients: {len(test_pats)}")
-        # Datasets & loaders
-        train_ds = MultiMagPatientDataset(patient_dict, train_pats, transform=train_transform)
-        test_ds = MultiMagPatientDataset(patient_dict, test_pats, transform=eval_transform)
-        test_loader = DataLoader(test_ds, batch_size=config['batch_size'], shuffle=False, num_workers=config['num_workers'], pin_memory=config['pin_memory'])
+        # Datasets with enhanced multi-image sampling
+        train_ds = MultiMagPatientDataset(
+            patient_dict, train_pats, transform=train_transform,
+            samples_per_patient=5,  # Base samples per patient
+            adaptive_sampling=True  # Use adaptive strategy based on available images
+        )
+        test_ds = MultiMagPatientDataset(
+            patient_dict, test_pats, transform=eval_transform,
+            samples_per_patient=1,  # Keep single sample for consistent evaluation
+            adaptive_sampling=False
+        )
+        
+        # Print sampling statistics
+        train_stats = train_ds.get_sampling_stats()
+        print(f"Training samples per epoch: {train_stats['total_samples_per_epoch']} "
+              f"(avg utilization: {train_stats['avg_utilization']:.1%})")
+        
+        test_loader = DataLoader(test_ds, batch_size=config['batch_size'], shuffle=False, 
+                               num_workers=config['num_workers'], pin_memory=config['pin_memory'])
 
         # Calculate class weights for imbalanced dataset
         train_labels = [train_ds.patient_dict[pid]['label'] for pid in train_pats]
@@ -96,13 +111,43 @@ def main():
         # Split training data into train/validation for nested CV
         train_pats_inner, val_pats = train_test_split(train_pats, test_size=0.2, random_state=42, stratify=[train_ds.patient_dict[pid]['label'] for pid in train_pats])
         
-        # Create inner validation dataset
-        val_ds = MultiMagPatientDataset(patient_dict, val_pats, transform=eval_transform)
-        val_loader = DataLoader(val_ds, batch_size=config['batch_size'], shuffle=False, num_workers=config['num_workers'], pin_memory=config['pin_memory'])
+        # Create inner validation dataset (single sample for consistent validation)
+        val_ds = MultiMagPatientDataset(
+            patient_dict, val_pats, transform=eval_transform,
+            samples_per_patient=1, adaptive_sampling=False
+        )
+        val_loader = DataLoader(val_ds, batch_size=config['batch_size'], shuffle=False, 
+                              num_workers=config['num_workers'], pin_memory=config['pin_memory'])
         
-        # Update training loader with reduced training set
-        train_ds_inner = MultiMagPatientDataset(patient_dict, train_pats_inner, transform=train_transform)
-        train_loader_inner = DataLoader(train_ds_inner, batch_size=config['batch_size'], shuffle=True, num_workers=config['num_workers'], pin_memory=config['pin_memory'], drop_last=True)
+        # Update training loader with reduced training set and enhanced sampling
+        train_ds_inner = MultiMagPatientDataset(
+            patient_dict, train_pats_inner, transform=train_transform,
+            samples_per_patient=5,  # Base samples per patient
+            adaptive_sampling=True
+        )
+        
+        # Adjust batch size for increased data volume
+        inner_train_stats = train_ds_inner.get_sampling_stats()
+        samples_per_epoch = inner_train_stats['total_samples_per_epoch']
+        
+        # Dynamic batch size adjustment based on data volume
+        if samples_per_epoch > 2000:
+            # Large dataset: keep original batch size
+            effective_batch_size = config['batch_size']
+        elif samples_per_epoch > 1000:
+            # Medium dataset: slight increase
+            effective_batch_size = min(config['batch_size'] + 4, 32)
+        else:
+            # Small dataset: increase batch size more
+            effective_batch_size = min(config['batch_size'] + 8, 32)
+            
+        print(f"Inner training samples: {samples_per_epoch}, batch size: {effective_batch_size}")
+        
+        train_loader_inner = DataLoader(
+            train_ds_inner, batch_size=effective_batch_size, shuffle=True, 
+            num_workers=config['num_workers'], pin_memory=config['pin_memory'], 
+            drop_last=True
+        )
         
         print(f"Inner split: Train {len(train_pats_inner)}, Val {len(val_pats)} patients")
         
@@ -117,6 +162,8 @@ def main():
         overfitting_threshold = 0.1  # If val_loss > train_loss + threshold for multiple epochs
         
         for epoch in range(1, epochs+1):
+            # Set epoch for deterministic sampling diversity
+            train_ds_inner.set_epoch(epoch)
             train_loss, train_acc = train_one_epoch(model, train_loader_inner, criterion, optimizer, device)
             val_loss, val_acc, val_bal, val_f1, val_auc, threshold = eval_model_with_threshold_optimization(model, val_loader, criterion, device)
             
