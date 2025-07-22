@@ -219,7 +219,8 @@ class MultiMagPatientDataset(Dataset):
                 'label': label,
                 'avg_images_per_mag': stats['avg_per_mag'],
                 'samples_per_epoch': samples,
-                'utilization_rate': samples / stats['avg_per_mag'] if stats['avg_per_mag'] > 0 else 0
+                'utilization_rate': (samples / (stats['avg_per_mag'] * self.epoch_multiplier)) if stats['avg_per_mag'] > 0 else 0,
+                'epoch_multiplier': self.epoch_multiplier
             })
             
         return {

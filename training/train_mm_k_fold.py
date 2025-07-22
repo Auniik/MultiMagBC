@@ -12,7 +12,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
     
     model.train()
     losses = []
-    all_preds, all_labels = []
+    all_preds = []
+    all_labels = []
     
     optimizer.zero_grad()
     
