@@ -11,3 +11,6 @@ dummy_batch = {
 model = MMNet().to('cpu')
 output = model(dummy_batch)
 print(output.shape)
+
+importance = model.get_magnification_importance()
+print("Magnification Importance Scores:", importance)

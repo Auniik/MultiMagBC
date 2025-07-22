@@ -71,6 +71,7 @@ def main():
     ])
 
     fold_metrics = []
+    importance_scores = []
     for fold_idx, (train_pats, test_pats) in enumerate(splitter.folds):
         print(f"\n===== Fold {fold_idx} =====")
         print(f"Train patients: {len(train_pats)}, Test patients: {len(test_pats)}")
@@ -214,6 +215,8 @@ def main():
                 optimal_threshold = threshold
                 epochs_no_improve = 0
                 print(f"✅ New best validation balanced accuracy: {best_val_bal_acc:.3f}, threshold: {optimal_threshold:.3f}")
+                importance = model.get_magnification_importance()
+                print(f"📊 Mag Importance (Val BalAcc: {val_bal:.3f}): {importance}")
             else:
                 epochs_no_improve += 1
             
@@ -233,7 +236,15 @@ def main():
         _, test_acc, test_bal, test_f1, test_auc, _ = eval_model(model, test_loader, criterion, device, optimal_threshold)
 
         print(f"⚡️ Test Results: Acc {test_acc:.3f}, BalAcc {test_bal:.3f}, F1 {test_f1:.3f}, AUC {test_auc:.3f} (threshold: {optimal_threshold:.3f})")
+        importance = model.get_magnification_importance()
+        print(f"📌 Final Magnification Importance (Fold {fold_idx}): {importance}")
+
         fold_metrics.append((test_acc, test_bal, test_f1, test_auc))
+        importance_scores.append({
+            'fold': fold_idx,
+            'importance': importance,
+            'optimal_threshold': optimal_threshold
+        })
     
     # Summary
     accs, bals, f1s, aucs = zip(*fold_metrics)

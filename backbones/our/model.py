@@ -99,6 +99,32 @@ class HierarchicalMagnificationAttention(nn.Module):
         return hier_out
 
 
+class ClinicalCrossMagFusion(nn.Module):
+    def __init__(self, feat_dim, num_mags):
+        super().__init__()
+        self.mag_importance = nn.Parameter(torch.ones(num_mags))
+        self.attn = nn.MultiheadAttention(embed_dim=feat_dim, num_heads=4, batch_first=True)
+        self.fusion = nn.Sequential(
+            nn.Linear(feat_dim * num_mags, feat_dim * 2),
+            nn.BatchNorm1d(feat_dim * 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(feat_dim * 2, feat_dim)
+        )
+        self.res_weight = nn.Parameter(torch.tensor(0.5))
+
+    def forward(self, feats_dict):
+        mags = list(feats_dict.keys())
+        feats = torch.stack([feats_dict[mag] for mag in mags], dim=1)
+        weights = F.softmax(self.mag_importance, dim=0)
+        weighted = feats * weights.view(1, -1, 1)
+        attn_out, _ = self.attn(weighted, weighted, weighted)
+        global_feat = attn_out.mean(dim=1)
+        concat_feat = torch.cat([feats_dict[mag] for mag in mags], dim=1)
+        fused_feat = self.fusion(concat_feat)
+        return self.res_weight * global_feat + (1 - self.res_weight) * fused_feat
+
+
 class MMNet(nn.Module):
     def __init__(self, magnifications=['40', '100', '200', '400'], num_classes=2, dropout=0.3, backbone='efficientnet_b1'):
         super().__init__()
@@ -123,10 +149,11 @@ class MMNet(nn.Module):
         })
 
         self.hierarchical_attn = HierarchicalMagnificationAttention(self.feat_channels)
+        self.cross_mag_fusion = ClinicalCrossMagFusion(self.feat_channels, len(magnifications))
 
         self.dropout = nn.Dropout(p=dropout)
         self.classifier = nn.Sequential(
-            nn.Linear(self.feat_channels * len(magnifications), 512),
+            nn.Linear(self.feat_channels, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
             self.dropout,
@@ -144,7 +171,7 @@ class MMNet(nn.Module):
             channel_outs[mag] = x
 
         hier_feats = self.hierarchical_attn(channel_outs)
-        fused = torch.cat([hier_feats[mag] for mag in self.magnifications], dim=1)
+        fused = self.cross_mag_fusion(hier_feats)
         fused = self.dropout(fused)
         logits = self.classifier(fused)
         return logits
@@ -154,3 +181,7 @@ class MMNet(nn.Module):
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"MMNet (feat_dim={self.feat_channels})")
         print(f"Total params: {total:,}, Trainable: {trainable:,}")
+
+    def get_magnification_importance(self):
+        weights = F.softmax(self.cross_mag_fusion.mag_importance, dim=0)
+        return {mag: float(weights[i]) for i, mag in enumerate(self.magnifications)}
