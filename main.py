@@ -83,9 +83,9 @@ def main():
             train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
             val_loss, val_acc, val_bal, val_f1, val_auc = eval_model(model, test_loader, criterion, device)
             scheduler.step()
-            print(f"Epoch {epoch:02d}: \n"
-                  f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} \n"
-                  f"Val: Loss {val_loss:.4f}, Acc {val_acc:.3f}, \n"
+            print(f"Epoch {epoch:02d}: "
+                  f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} |"
+                  f"Val: Loss {val_loss:.4f}, Acc {val_acc:.3f}, "
                   f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}")
             # Save best
             if val_bal > best_bal_acc:
