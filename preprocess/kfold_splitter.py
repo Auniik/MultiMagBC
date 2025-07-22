@@ -24,7 +24,8 @@ class PatientWiseKFoldSplitter:
         dataset_dir,
         n_splits=5,
         random_state=42,
-        stratify_subtype=False
+        stratify_subtype=False,
+        validation_split=0.2  # Reduced from 0.3 for better training data utilization
     ):
         self.dataset_dir = dataset_dir
         self.n_splits = n_splits

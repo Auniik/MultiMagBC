@@ -16,21 +16,21 @@ MAGNIFICATIONS = ['40X', '100X', '200X', '400X']
 NUM_EPOCHS = 25
 LEARNING_RATE = 5e-5  # Reduced for more stable training with enhanced sampling
 RANDOM_SEED = 42
-EARLY_STOPPING_PATIENCE = 7
+EARLY_STOPPING_PATIENCE = 5  # Reduced from 7 for faster overfitting detection
 LR_SCHEDULER_PATIENCE = 3
 LR_SCHEDULER_FACTOR = 0.5
 
 # Enhanced regularization settings for multi-image sampling
-DROPOUT_RATE = 0.7  # Increased from 0.5 to combat overfitting
-WEIGHT_DECAY = 5e-3  # Increased from 1e-3 for stronger regularization
-LABEL_SMOOTHING = 0.2  # Increased from 0.1 to prevent overconfidence
+DROPOUT_RATE = 0.8  # Further increased from 0.7 to combat severe overfitting
+WEIGHT_DECAY = 1e-2  # Increased from 5e-3 for stronger regularization
+LABEL_SMOOTHING = 0.3  # Increased from 0.2 to prevent overconfidence
 
 # Mixup augmentation settings
-MIXUP_ALPHA = 0.2  # Alpha parameter for mixup augmentation
+MIXUP_ALPHA = 0.4  # Increased from 0.2 for stronger regularization
 
-# Focal loss settings
-FOCAL_ALPHA = 0.7  # Weight for positive class
-FOCAL_GAMMA = 2.0  # Focusing parameter
+# Focal loss settings - optimized for class imbalance
+FOCAL_ALPHA = 0.25  # Reduced from 0.7 to better handle malignant majority (70.7%)
+FOCAL_GAMMA = 3.0  # Increased from 2.0 for better focus on hard examples
 
 # Model settings
 BACKBONE = 'efficientnet_b0'
@@ -49,35 +49,70 @@ def get_device():
         return torch.device('cpu')
 
 class FocalLoss(torch.nn.Module):
-    """Focal Loss for addressing class imbalance"""
-    def __init__(self, alpha=0.7, gamma=2.0, weight=None, label_smoothing=0.0):
+    """Enhanced Focal Loss for addressing severe class imbalance"""
+    def __init__(self, alpha=0.25, gamma=3.0, weight=None, label_smoothing=0.3):
         super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
+        self.alpha = alpha  # Weight for positive class (benign)
+        self.gamma = gamma  # Higher gamma for better focus on hard examples
         self.weight = weight
         self.label_smoothing = label_smoothing
         
     def forward(self, inputs, targets):
-        # Apply label smoothing
-        if self.label_smoothing > 0:
-            num_classes = inputs.size(-1)
-            targets_onehot = torch.zeros_like(inputs).scatter(1, targets.unsqueeze(1), 1)
-            targets_smooth = targets_onehot * (1 - self.label_smoothing) + self.label_smoothing / num_classes
-            ce_loss = -(targets_smooth * torch.log_softmax(inputs, dim=1)).sum(dim=1)
-        else:
-            ce_loss = torch.nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
-        
-        # Calculate probabilities and focal weight
-        pt = torch.exp(-ce_loss)
-        
-        # Apply alpha weighting
-        if self.alpha is not None:
-            alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
-            focal_weight = alpha_t * (1 - pt) ** self.gamma
-        else:
-            focal_weight = (1 - pt) ** self.gamma
+        # Ensure inputs are properly shaped
+        if inputs.dim() > 2:
+            inputs = inputs.view(inputs.size(0), -1)
+        if inputs.size(-1) == 1:
+            # Binary classification case
+            inputs = inputs.squeeze(-1)
+            targets = targets.float()
             
-        focal_loss = focal_weight * ce_loss
+            # Apply label smoothing for binary case
+            if self.label_smoothing > 0:
+                targets = targets * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
+            
+            # Calculate BCE with logits for numerical stability
+            bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                inputs, targets, reduction='none'
+            )
+            
+            # Calculate probabilities
+            probs = torch.sigmoid(inputs)
+            pt = torch.where(targets == 1, probs, 1 - probs)
+            
+            # Apply alpha weighting for class imbalance
+            alpha_t = torch.where(targets == 1, 
+                                torch.tensor(self.alpha, device=inputs.device), 
+                                torch.tensor(1 - self.alpha, device=inputs.device))
+            
+            # Calculate focal loss
+            focal_weight = alpha_t * (1 - pt) ** self.gamma
+            focal_loss = focal_weight * bce_loss
+            
+        else:
+            # Multi-class case
+            # Apply label smoothing
+            if self.label_smoothing > 0:
+                num_classes = inputs.size(-1)
+                targets_onehot = torch.zeros_like(inputs).scatter(1, targets.unsqueeze(1), 1)
+                targets_smooth = targets_onehot * (1 - self.label_smoothing) + self.label_smoothing / num_classes
+                ce_loss = -(targets_smooth * torch.log_softmax(inputs, dim=1)).sum(dim=1)
+            else:
+                ce_loss = torch.nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
+            
+            # Calculate probabilities and focal weight
+            pt = torch.exp(-ce_loss)
+            
+            # Apply alpha weighting
+            if self.alpha is not None and len(targets) > 0:
+                # Create alpha tensor based on target class
+                alpha_t = torch.where(targets == 1, 
+                                    torch.tensor(self.alpha, device=inputs.device), 
+                                    torch.tensor(1 - self.alpha, device=inputs.device))
+                focal_weight = alpha_t * (1 - pt) ** self.gamma
+            else:
+                focal_weight = (1 - pt) ** self.gamma
+                
+            focal_loss = focal_weight * ce_loss
         
         return focal_loss.mean()
 

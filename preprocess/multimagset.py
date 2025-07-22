@@ -1,14 +1,16 @@
 import os
 import random
-from torch.utils.data import Dataset
+import torch
+from torch.utils.data import Dataset, WeightedRandomSampler
 from PIL import Image
 from collections import defaultdict
+import numpy as np
 
 
 class MultiMagPatientDataset(Dataset):
     def __init__(self, patient_dict, patient_ids, mags=['40', '100', '200', '400'], 
                  transform=None, samples_per_patient=1, epoch_multiplier=1, 
-                 adaptive_sampling=True):
+                 adaptive_sampling=True, class_balanced_sampling=True):
         """
         Enhanced dataset with multi-image sampling per patient
         
@@ -28,11 +30,16 @@ class MultiMagPatientDataset(Dataset):
         self.samples_per_patient = samples_per_patient
         self.epoch_multiplier = epoch_multiplier
         self.adaptive_sampling = adaptive_sampling
+        self.class_balanced_sampling = class_balanced_sampling
         self.epoch_seed = 0
         
         # Pre-compute image distribution per patient for adaptive sampling
         self.patient_image_counts = self._compute_patient_stats()
         self.effective_samples = self._compute_effective_samples()
+        
+        # Setup class-balanced sampling
+        if self.class_balanced_sampling:
+            self._setup_class_balanced_sampling()
         
     def _compute_patient_stats(self):
         """Compute image count statistics per patient per magnification"""
@@ -152,16 +159,63 @@ class MultiMagPatientDataset(Dataset):
             
         return images_dict, label
     
+    def _setup_class_balanced_sampling(self):
+        """Setup class-balanced sampling weights for imbalanced datasets"""
+        # Group patients by class
+        self.class_to_patients = defaultdict(list)
+        for pid in self.patient_ids:
+            label = self.patient_dict[pid]['label']
+            self.class_to_patients[label].append(pid)
+        
+        # Calculate class weights
+        class_counts = {cls: len(patients) for cls, patients in self.class_to_patients.items()}
+        total_patients = len(self.patient_ids)
+        self.class_weights = {
+            cls: total_patients / (len(class_counts) * count) 
+            for cls, count in class_counts.items()
+        }
+        
+        # Create patient weights for balanced sampling
+        self.patient_weights = {}
+        for cls, patients in self.class_to_patients.items():
+            weight = self.class_weights[cls] / len(patients)
+            for pid in patients:
+                self.patient_weights[pid] = weight
+    
+    def get_class_balanced_sampler(self):
+        """Create a WeightedRandomSampler for class-balanced training"""
+        if not self.class_balanced_sampling:
+            return None
+        
+        # Create weights for each sample based on patient class weights
+        sample_weights = []
+        for pid in self.patient_ids:
+            patient_weight = self.patient_weights[pid]
+            samples_count = self.effective_samples[pid] * self.epoch_multiplier
+            sample_weights.extend([patient_weight] * samples_count)
+        
+        return WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True
+        )
+    
     def get_sampling_stats(self):
-        """Get statistics about sampling strategy"""
-        total_samples = sum(self.effective_samples.values())
+        """Get comprehensive statistics about sampling strategy"""
+        total_samples = sum(self.effective_samples.values()) * self.epoch_multiplier
         patient_stats = []
         
+        # Count samples per class
+        class_samples = defaultdict(int)
         for pid in self.patient_ids:
+            label = self.patient_dict[pid]['label']
+            samples = self.effective_samples[pid] * self.epoch_multiplier
+            class_samples[label] += samples
+            
             stats = self.patient_image_counts[pid]
-            samples = self.effective_samples[pid]
             patient_stats.append({
                 'patient_id': pid,
+                'label': label,
                 'avg_images_per_mag': stats['avg_per_mag'],
                 'samples_per_epoch': samples,
                 'utilization_rate': samples / stats['avg_per_mag'] if stats['avg_per_mag'] > 0 else 0
@@ -169,7 +223,8 @@ class MultiMagPatientDataset(Dataset):
             
         return {
             'total_samples_per_epoch': total_samples,
-            'total_with_multiplier': total_samples * self.epoch_multiplier,
+            'class_distribution': dict(class_samples),
+            'class_weights': self.class_weights if self.class_balanced_sampling else None,
             'patient_details': patient_stats,
             'avg_utilization': sum(p['utilization_rate'] for p in patient_stats) / len(patient_stats)
         }

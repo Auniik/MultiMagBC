@@ -6,8 +6,8 @@ from tqdm import tqdm
 import torch.nn as nn
 
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=True, mixup_alpha=0.2):
-    """Enhanced training with mixup augmentation and stronger regularization"""
+def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=True, mixup_alpha=0.4):
+    """Enhanced training with stronger regularization and overfitting detection"""
     from config import mixup_data, mixup_criterion
     
     model.train()
@@ -21,7 +21,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
         
         optimizer.zero_grad()
         
-        # Apply mixup augmentation for stronger regularization
+        # Apply stronger mixup augmentation
         if use_mixup and mixup_alpha > 0:
             mixed_images, y_a, y_b, lam = mixup_data(images, labels, mixup_alpha, device)
             logits, _ = model(mixed_images)
@@ -38,8 +38,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
         
         loss.backward()
         
-        # Gradient clipping for stability
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        # Stronger gradient clipping for stability
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
         
         optimizer.step()
 
@@ -51,20 +51,19 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
     return np.mean(losses), acc
 
 def find_optimal_threshold(y_true, y_probs):
-    """Find optimal threshold that maximizes F1 score"""
-    _, _, thresholds = roc_curve(y_true, y_probs)
-    best_threshold = 0.5
-    best_f1 = 0
+    """Find optimal threshold using Youden's J statistic for imbalanced datasets"""
+    fpr, tpr, thresholds = roc_curve(y_true, y_probs)
     
-    for threshold in thresholds:
-        y_pred = (y_probs >= threshold).astype(int)
-        try:
-            current_f1 = f1_score(y_true, y_pred)
-            if current_f1 > best_f1:
-                best_f1 = current_f1
-                best_threshold = threshold
-        except:
-            continue
+    # Youden's J statistic: J = sensitivity + specificity - 1
+    # This is more robust for imbalanced datasets than F1 maximization
+    youden_scores = tpr - fpr
+    
+    # Find threshold that maximizes Youden's J
+    optimal_idx = np.argmax(youden_scores)
+    best_threshold = thresholds[optimal_idx]
+    
+    # Ensure threshold is reasonable (not too extreme)
+    best_threshold = np.clip(best_threshold, 0.1, 0.9)
     
     return best_threshold
 
@@ -96,7 +95,7 @@ def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
     return np.mean(losses), acc, bal_acc, f1, auc, all_probs
 
 def eval_model_with_threshold_optimization(model, dataloader, criterion, device, use_dropout=True):
-    """Evaluate model and find optimal threshold with optional validation dropout"""
+    """Evaluate model and find optimal threshold with enhanced overfitting detection"""
     if use_dropout:
         # Keep model in training mode for validation dropout regularization
         model.train()
