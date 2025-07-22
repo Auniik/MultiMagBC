@@ -73,13 +73,13 @@ def main():
     for fold_idx, (train_pats, test_pats) in enumerate(splitter.folds):
         print(f"\n===== Fold {fold_idx} =====")
         print(f"Train patients: {len(train_pats)}, Test patients: {len(test_pats)}")
-        # Datasets with MAXIMUM utilization sampling
-        from config import SAMPLES_PER_PATIENT_MAX, EPOCH_MULTIPLIER_MAX
+        # Datasets with BALANCED maximum utilization
+        from config import SAMPLES_PER_PATIENT_BALANCED, EPOCH_MULTIPLIER_BALANCED
         train_ds = MultiMagPatientDataset(
             patient_dict, train_pats, transform=train_transform,
-            samples_per_patient=SAMPLES_PER_PATIENT_MAX,  # MAXIMUM sampling for training
-            epoch_multiplier=EPOCH_MULTIPLIER_MAX,     # 4x diverse combinations
-            adaptive_sampling=True  # Use MAXIMUM utilization strategy
+            samples_per_patient=SAMPLES_PER_PATIENT_BALANCED,  # Balanced 5 samples
+            epoch_multiplier=EPOCH_MULTIPLIER_BALANCED,     # 3x diverse combinations
+            adaptive_sampling=True  # Balanced utilization strategy
         )
         test_ds = MultiMagPatientDataset(
             patient_dict, test_pats, transform=eval_transform,
@@ -114,23 +114,23 @@ def main():
         # Split training data into train/validation for nested CV (increased validation size)
         train_pats_inner, val_pats = train_test_split(train_pats, test_size=0.3, random_state=42, stratify=[train_ds.patient_dict[pid]['label'] for pid in train_pats])
         
-        # Create inner validation dataset with enhanced sampling
-        from config import VAL_SAMPLES_PER_PATIENT_MAX, EPOCH_MULTIPLIER_MAX
+        # Create inner validation dataset with BALANCED sampling
+        from config import VAL_SAMPLES_PER_PATIENT_BALANCED
         val_ds = MultiMagPatientDataset(
             patient_dict, val_pats, transform=eval_transform,
-            samples_per_patient=VAL_SAMPLES_PER_PATIENT_MAX,  # MAXIMUM sampling for validation
-            epoch_multiplier=EPOCH_MULTIPLIER_MAX//2,     # 2x diverse combinations for validation
-            adaptive_sampling=True  # Use MAXIMUM utilization strategy
+            samples_per_patient=VAL_SAMPLES_PER_PATIENT_BALANCED,  # Balanced 2 samples
+            epoch_multiplier=1,     # Single epoch for consistent validation
+            adaptive_sampling=False  # Consistent validation sampling
         )
         val_loader = DataLoader(val_ds, batch_size=config['batch_size'], shuffle=False, 
                               num_workers=config['num_workers'], pin_memory=config['pin_memory'])
         
-        # Update training loader with MAXIMUM utilization sampling
+        # Update training loader with BALANCED utilization sampling
         train_ds_inner = MultiMagPatientDataset(
             patient_dict, train_pats_inner, transform=train_transform,
-            samples_per_patient=SAMPLES_PER_PATIENT_MAX,  # MAXIMUM sampling for inner training
-            epoch_multiplier=EPOCH_MULTIPLIER_MAX,     # 4x diverse combinations
-            adaptive_sampling=True  # Use MAXIMUM utilization strategy
+            samples_per_patient=SAMPLES_PER_PATIENT_BALANCED,  # Balanced 5 samples
+            epoch_multiplier=EPOCH_MULTIPLIER_BALANCED,     # 3x diverse combinations
+            adaptive_sampling=True  # Balanced utilization strategy
         )
         
         # Adjust batch size for increased data volume
@@ -202,7 +202,7 @@ def main():
                     overfitting_warning = " [TRAIN-VAL DIVERGENCE]"
             
             print(f"Epoch {epoch:02d}: "
-                  f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} |"
+                  f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} | "
                   f"Val: Loss {val_loss:.4f}, Acc {val_acc:.3f}, "
                   f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}, Thresh {threshold:.3f}"
                   f"{overfitting_warning}{perfect_validation_warning}")

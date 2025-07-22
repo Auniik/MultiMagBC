@@ -23,17 +23,17 @@ LR_SCHEDULER_FACTOR = 0.5
 # Gradient accumulation for effective larger batch sizes
 GRADIENT_ACCUMULATION_STEPS = 2  # Effective batch size = 16 * 2 = 32
 
-# Balanced regularization settings - reverted from overly aggressive values
-DROPOUT_RATE = 0.6  # Reverted from 0.8 - still strong but not stifling
-WEIGHT_DECAY = 1e-3  # Reverted from 1e-2 - standard regularization
-LABEL_SMOOTHING = 0.1  # Reverted from 0.3 - prevents over-regularization
+# Enhanced regularization settings for balanced utilization
+DROPOUT_RATE = 0.75  # Increased to prevent overfitting with more data
+WEIGHT_DECAY = 3e-3  # Moderate increase for better generalization
+LABEL_SMOOTHING = 0.15  # Balanced smoothing to prevent overconfidence
 
 # Mixup augmentation settings
 MIXUP_ALPHA = 0.2  # Reverted from 0.4 - moderate augmentation
 
-# Focal loss settings - restored for majority class
-FOCAL_ALPHA = 0.75  # Restored to favor malignant class (70.7% majority)
-FOCAL_GAMMA = 2.0  # Reverted from 3.0 - prevents over-penalization
+# Focal loss settings for balanced utilization
+FOCAL_ALPHA = 0.5   # More balanced class weighting (vs 70.7% malignant)
+FOCAL_GAMMA = 3.0   # Increased focus on hard examples with more data
 
 # Model settings
 BACKBONE = 'efficientnet_b0'
@@ -43,11 +43,11 @@ NUM_SUBTYPE_CLASSES = 8
 # Output paths
 OUTPUT_DIR = './output'
 
-# Dataset utilization settings for maximum sampling
+# Dataset utilization settings for BALANCED maximum sampling
 MAX_UTILIZATION_MODE = True  # Enable maximum dataset utilization
-SAMPLES_PER_PATIENT_MAX = 8  # Maximum samples per patient for training
-EPOCH_MULTIPLIER_MAX = 4     # 4x diverse combinations per epoch
-VAL_SAMPLES_PER_PATIENT_MAX = 4  # Maximum samples for validation
+SAMPLES_PER_PATIENT_BALANCED = 5  # Balanced samples per patient (prevents overfitting)
+EPOCH_MULTIPLIER_BALANCED = 3     # 3x diverse combinations (optimal balance)
+VAL_SAMPLES_PER_PATIENT_BALANCED = 2  # Balanced validation samples
 
 def get_device():
     if torch.cuda.is_available():

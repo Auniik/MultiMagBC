@@ -61,25 +61,30 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
     return np.mean(losses), acc
 
 def find_optimal_threshold(y_true, y_probs):
-    """Find optimal threshold that maximizes F1 score (restored for better calibration)"""
+    """Find optimal threshold with enhanced filtering and calibration"""
     _, _, thresholds = roc_curve(y_true, y_probs)
     best_threshold = 0.5
     best_f1 = 0
     
-    # Filter out extreme thresholds
-    valid_thresholds = [t for t in thresholds if 0.1 <= t <= 0.9]
+    # Tighter threshold filtering for better calibration
+    valid_thresholds = [t for t in thresholds if 0.3 <= t <= 0.7]
     
     for threshold in valid_thresholds:
         y_pred = (y_probs >= threshold).astype(int)
         try:
             current_f1 = f1_score(y_true, y_pred, zero_division=0)
-            if current_f1 > best_f1:
-                best_f1 = current_f1
+            # Add penalty for extreme thresholds to encourage calibration
+            threshold_penalty = abs(threshold - 0.5) * 0.1  # Small penalty
+            adjusted_f1 = current_f1 - threshold_penalty
+            
+            if adjusted_f1 > best_f1:
+                best_f1 = adjusted_f1
                 best_threshold = threshold
         except:
             continue
     
-    return best_threshold
+    # Fallback to 0.5 if no valid threshold found
+    return max(0.3, min(0.7, best_threshold))
 
 def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
     """Evaluate model with a given threshold (do not optimize threshold on test set)"""
