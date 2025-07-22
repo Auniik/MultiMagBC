@@ -6,6 +6,7 @@ Main entry point for data analysis and training
 import os
 from typing import Any
 import numpy as np
+from sklearn.metrics import confusion_matrix
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -201,25 +202,26 @@ def main():
                 if recent_val_loss > recent_train_loss + overfitting_threshold:
                     overfitting_warning = " [TRAIN-VAL DIVERGENCE]"
             
+            precision = val_bal * (val_f1 / (2 * val_bal - val_f1)) if (2 * val_bal - val_f1) > 0 else 0
+            recall = val_bal * (val_f1 / (2 * val_bal - val_f1)) if (2 * val_bal - val_f1) > 0 else 0
             print(f"Epoch {epoch:02d}: "
                   f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} | "
                   f"Val: Loss {val_loss:.4f}, Acc {val_acc:.3f}, "
-                  f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}, Thresh {threshold:.3f}"
+                  f"BalAcc {val_bal:.3f}, Prec {precision:.3f}, Rec {recall:.3f} | F1 {val_f1:.3f}, AUC {val_auc:.3f}, Thresh {threshold:.3f} | LR: {optimizer.param_groups[0]['lr']:.6f} "
                   f"{overfitting_warning}{perfect_validation_warning}")
             
-            # Save best model and implement early stopping
             if val_bal > best_val_bal_acc:
                 best_val_bal_acc = val_bal
                 best_model_state = model.state_dict().copy()
                 optimal_threshold = threshold
                 epochs_no_improve = 0
-                print(f"New best validation balanced accuracy: {best_val_bal_acc:.3f}, threshold: {optimal_threshold:.3f}")
+                print(f"✅ New best validation balanced accuracy: {best_val_bal_acc:.3f}, threshold: {optimal_threshold:.3f}")
             else:
                 epochs_no_improve += 1
             
             # Early stopping
             if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
-                print(f"Early stopping after {epoch} epochs (no improvement for {EARLY_STOPPING_PATIENCE} epochs)")
+                print(f"⚠️ Early stopping after {epoch} epochs (no improvement for {EARLY_STOPPING_PATIENCE} epochs)")
                 break
         
         # Load best model and evaluate on test set with optimized threshold
@@ -227,13 +229,16 @@ def main():
             model.load_state_dict(best_model_state)
             ckpt_path = os.path.join(config['output_dir'], 'models', f"best_model_fold_{fold_idx}.pth")
             torch.save(best_model_state, ckpt_path)
-            print(f"Best model saved: {ckpt_path} (Val BalAcc: {best_val_bal_acc:.3f})")
+            print(f"✅ Best model saved: {ckpt_path} (Val BalAcc: {best_val_bal_acc:.3f})")
         
         # Final test evaluation with optimized threshold (NO threshold optimization on test set)
         _, test_acc, test_bal, test_f1, test_auc, _ = eval_model(model, test_loader, criterion, device, optimal_threshold)
-        print(f"Test Results: Acc {test_acc:.3f}, BalAcc {test_bal:.3f}, F1 {test_f1:.3f}, AUC {test_auc:.3f} (threshold: {optimal_threshold:.3f})")
-        
+        test_prec = test_bal * (test_f1 / (2 * test_bal - test_f1)) if (2 * test_bal - test_f1) > 0 else 0
+        test_rec = test_bal * (test_f1 / (2 * test_bal - test_f1)) if (2 * test_bal - test_f1) > 0 else 0
+
+        print(f"⚡️ Test Results: Acc {test_acc:.3f}, BalAcc {test_bal:.3f}, Prec {test_prec:.3f}, Rec {test_rec:.3f} | F1 {test_f1:.3f}, AUC {test_auc:.3f} (threshold: {optimal_threshold:.3f})")
         fold_metrics.append((test_acc, test_bal, test_f1, test_auc))
+    
     # Summary
     accs, bals, f1s, aucs = zip(*fold_metrics)
     print("\n=== Cross-Validation Results ===")
@@ -241,6 +246,8 @@ def main():
     print(f"BalAcc: {np.mean(bals):.3f} ± {np.std(bals):.3f}")
     print(f"F1: {np.mean(f1s):.3f} ± {np.std(f1s):.3f}")
     print(f"AUC: {np.mean(aucs):.3f} ± {np.std(aucs):.3f}")
+    print(f"Precision: {np.mean([bals[i] for i in range(len(bals)) if accs[i] > 0.5]):.3f} ± {np.std([bals[i] for i in range(len(bals)) if accs[i] > 0.5]):.3f}")
+    print(f"Recall: {np.mean([bals[i] for i in range(len(bals)) if accs[i] > 0.5]):.3f} ± {np.std([bals[i] for i in range(len(bals)) if accs[i] > 0.5]):.3f}")
 
 
 
