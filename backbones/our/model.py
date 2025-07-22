@@ -71,6 +71,34 @@ class StochasticDepth(nn.Module):
         return x * rand / keep_prob
 
 
+class HierarchicalMagnificationAttention(nn.Module):
+    def __init__(self, feat_dim, num_heads=8):
+        super().__init__()
+        self.mag_hierarchy = ['40', '100', '200', '400']
+        self.embeddings = nn.Parameter(torch.randn(len(self.mag_hierarchy), feat_dim))
+        self.attn_layers = nn.ModuleDict({
+            mag: nn.MultiheadAttention(feat_dim, num_heads, batch_first=True)
+            for mag in self.mag_hierarchy[1:]
+        })
+        self.norms = nn.ModuleDict({
+            mag: nn.LayerNorm(feat_dim)
+            for mag in self.mag_hierarchy[1:]
+        })
+
+    def forward(self, mag_feats):
+        enhanced = {}
+        for i, mag in enumerate(self.mag_hierarchy):
+            enhanced[mag] = mag_feats[mag] + self.embeddings[i]
+        hier_out = {'40': enhanced['40']}
+        for i, mag in enumerate(self.mag_hierarchy[1:], 1):
+            prev_feats = torch.stack([hier_out[m] for m in self.mag_hierarchy[:i]], dim=1)
+            query = enhanced[mag].unsqueeze(1)
+            attended, _ = self.attn_layers[mag](query, prev_feats, prev_feats)
+            fused = self.norms[mag](enhanced[mag] + attended.squeeze(1))
+            hier_out[mag] = fused
+        return hier_out
+
+
 class MMNet(nn.Module):
     def __init__(self, magnifications=['40', '100', '200', '400'], num_classes=2, dropout=0.3, backbone='efficientnet_b1'):
         super().__init__()
@@ -81,7 +109,7 @@ class MMNet(nn.Module):
         })
 
         with torch.no_grad():
-            dummy = torch.randn(1, 3, 224, 224).to(next(self.parameters()).device)
+            dummy = torch.randn(1, 3, 224, 224).to('cpu')
             self.feat_channels = self.extractors['extractor_40x'](dummy).shape[1]
 
         self.spatial_att = nn.ModuleDict({
@@ -94,6 +122,8 @@ class MMNet(nn.Module):
             for mag in magnifications
         })
 
+        self.hierarchical_attn = HierarchicalMagnificationAttention(self.feat_channels)
+
         self.dropout = nn.Dropout(p=dropout)
         self.classifier = nn.Sequential(
             nn.Linear(self.feat_channels * len(magnifications), 512),
@@ -104,23 +134,20 @@ class MMNet(nn.Module):
         )
 
     def forward(self, images_dict):
-        features = []
+        channel_outs = {}
         for mag in self.magnifications:
             x = images_dict[f'mag_{mag}']
             x = self.extractors[f'extractor_{mag}x'](x)
             x = StochasticDepth(0.1)(x)
             x, _ = self.channel_att[f'ch_att_{mag}x'](x)
             x, _ = self.spatial_att[f'sp_att_{mag}x'](x)
-            features.append(x)
+            channel_outs[mag] = x
 
-        fused = torch.cat(features, dim=1)
+        hier_feats = self.hierarchical_attn(channel_outs)
+        fused = torch.cat([hier_feats[mag] for mag in self.magnifications], dim=1)
         fused = self.dropout(fused)
         logits = self.classifier(fused)
         return logits
-
-    def get_magnification_importance(self):
-        # Placeholder: add real mag importance logic if using attention
-        return {mag: 1.0 / len(self.magnifications) for mag in self.magnifications}
 
     def print_model_summary(self):
         total = sum(p.numel() for p in self.parameters())

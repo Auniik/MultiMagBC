@@ -202,12 +202,10 @@ def main():
                 if recent_val_loss > recent_train_loss + overfitting_threshold:
                     overfitting_warning = " [TRAIN-VAL DIVERGENCE]"
             
-            precision = val_bal * (val_f1 / (2 * val_bal - val_f1)) if (2 * val_bal - val_f1) > 0 else 0
-            recall = val_bal * (val_f1 / (2 * val_bal - val_f1)) if (2 * val_bal - val_f1) > 0 else 0
             print(f"Epoch {epoch:02d}: "
                   f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} | "
                   f"Val: Loss {val_loss:.4f}, Acc {val_acc:.3f}, "
-                  f"BalAcc {val_bal:.3f}, Prec {precision:.3f}, Rec {recall:.3f} | F1 {val_f1:.3f}, AUC {val_auc:.3f}, Thresh {threshold:.3f} | LR: {optimizer.param_groups[0]['lr']:.6f} "
+                  f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}, Thresh {threshold:.3f} | LR: {optimizer.param_groups[0]['lr']:.6f} "
                   f"{overfitting_warning}{perfect_validation_warning}")
             
             if val_bal > best_val_bal_acc:
@@ -233,10 +231,8 @@ def main():
         
         # Final test evaluation with optimized threshold (NO threshold optimization on test set)
         _, test_acc, test_bal, test_f1, test_auc, _ = eval_model(model, test_loader, criterion, device, optimal_threshold)
-        test_prec = test_bal * (test_f1 / (2 * test_bal - test_f1)) if (2 * test_bal - test_f1) > 0 else 0
-        test_rec = test_bal * (test_f1 / (2 * test_bal - test_f1)) if (2 * test_bal - test_f1) > 0 else 0
 
-        print(f"⚡️ Test Results: Acc {test_acc:.3f}, BalAcc {test_bal:.3f}, Prec {test_prec:.3f}, Rec {test_rec:.3f} | F1 {test_f1:.3f}, AUC {test_auc:.3f} (threshold: {optimal_threshold:.3f})")
+        print(f"⚡️ Test Results: Acc {test_acc:.3f}, BalAcc {test_bal:.3f}, F1 {test_f1:.3f}, AUC {test_auc:.3f} (threshold: {optimal_threshold:.3f})")
         fold_metrics.append((test_acc, test_bal, test_f1, test_auc))
     
     # Summary
