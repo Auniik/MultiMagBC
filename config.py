@@ -14,23 +14,26 @@ MAGNIFICATIONS = ['40X', '100X', '200X', '400X']
 
 # Training settings
 NUM_EPOCHS = 25
-LEARNING_RATE = 5e-5  # Reduced for more stable training with enhanced sampling
+LEARNING_RATE = 1e-4  # Increased from 5e-5 to accelerate learning
 RANDOM_SEED = 42
-EARLY_STOPPING_PATIENCE = 5  # Reduced from 7 for faster overfitting detection
+EARLY_STOPPING_PATIENCE = 7  # Restored to original for stable training
 LR_SCHEDULER_PATIENCE = 3
 LR_SCHEDULER_FACTOR = 0.5
 
-# Enhanced regularization settings for multi-image sampling
-DROPOUT_RATE = 0.8  # Further increased from 0.7 to combat severe overfitting
-WEIGHT_DECAY = 1e-2  # Increased from 5e-3 for stronger regularization
-LABEL_SMOOTHING = 0.3  # Increased from 0.2 to prevent overconfidence
+# Gradient accumulation for effective larger batch sizes
+GRADIENT_ACCUMULATION_STEPS = 2  # Effective batch size = 16 * 2 = 32
+
+# Balanced regularization settings - reverted from overly aggressive values
+DROPOUT_RATE = 0.6  # Reverted from 0.8 - still strong but not stifling
+WEIGHT_DECAY = 1e-3  # Reverted from 1e-2 - standard regularization
+LABEL_SMOOTHING = 0.1  # Reverted from 0.3 - prevents over-regularization
 
 # Mixup augmentation settings
-MIXUP_ALPHA = 0.4  # Increased from 0.2 for stronger regularization
+MIXUP_ALPHA = 0.2  # Reverted from 0.4 - moderate augmentation
 
-# Focal loss settings - optimized for class imbalance
-FOCAL_ALPHA = 0.25  # Reduced from 0.7 to better handle malignant majority (70.7%)
-FOCAL_GAMMA = 3.0  # Increased from 2.0 for better focus on hard examples
+# Focal loss settings - restored for majority class
+FOCAL_ALPHA = 0.75  # Restored to favor malignant class (70.7% majority)
+FOCAL_GAMMA = 2.0  # Reverted from 3.0 - prevents over-penalization
 
 # Model settings
 BACKBONE = 'efficientnet_b0'
@@ -39,6 +42,12 @@ NUM_SUBTYPE_CLASSES = 8
 
 # Output paths
 OUTPUT_DIR = './output'
+
+# Dataset utilization settings for maximum sampling
+MAX_UTILIZATION_MODE = True  # Enable maximum dataset utilization
+SAMPLES_PER_PATIENT_MAX = 8  # Maximum samples per patient for training
+EPOCH_MULTIPLIER_MAX = 4     # 4x diverse combinations per epoch
+VAL_SAMPLES_PER_PATIENT_MAX = 4  # Maximum samples for validation
 
 def get_device():
     if torch.cuda.is_available():

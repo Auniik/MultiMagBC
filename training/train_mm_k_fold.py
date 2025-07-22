@@ -6,22 +6,22 @@ from tqdm import tqdm
 import torch.nn as nn
 
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=True, mixup_alpha=0.4):
-    """Enhanced training with stronger regularization and overfitting detection"""
+def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=True, mixup_alpha=0.2, accumulation_steps=1):
+    """Enhanced training with gradient accumulation for better GPU utilization"""
     from config import mixup_data, mixup_criterion
     
     model.train()
     losses = []
-    all_preds, all_labels = [], []
+    all_preds, all_labels = []
     
-    for images_dict, labels in tqdm(dataloader, desc='Train', leave=False):
+    optimizer.zero_grad()
+    
+    for batch_idx, (images_dict, labels) in enumerate(tqdm(dataloader, desc='Train', leave=False)):
         # Move to device
         images = {k: v.to(device) for k, v in images_dict.items()}
         labels = labels.to(device)
         
-        optimizer.zero_grad()
-        
-        # Apply stronger mixup augmentation
+        # Apply moderate mixup augmentation
         if use_mixup and mixup_alpha > 0:
             mixed_images, y_a, y_b, lam = mixup_data(images, labels, mixup_alpha, device)
             logits, _ = model(mixed_images)
@@ -36,34 +36,47 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
             loss = criterion(logits, labels)
             preds = torch.argmax(logits, dim=1).cpu().numpy()
         
+        # Scale loss by accumulation steps
+        loss = loss / accumulation_steps
         loss.backward()
         
-        # Stronger gradient clipping for stability
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-        
-        optimizer.step()
+        # Update weights every accumulation_steps
+        if (batch_idx + 1) % accumulation_steps == 0:
+            # Moderate gradient clipping
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            optimizer.zero_grad()
 
-        losses.append(loss.item())
+        losses.append(loss.item() * accumulation_steps)
         all_preds.extend(preds)
         all_labels.extend(labels.cpu().numpy())
         
+    # Handle remaining gradients
+    if len(dataloader) % accumulation_steps != 0:
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+    
     acc = accuracy_score(all_labels, all_preds)
     return np.mean(losses), acc
 
 def find_optimal_threshold(y_true, y_probs):
-    """Find optimal threshold using Youden's J statistic for imbalanced datasets"""
-    fpr, tpr, thresholds = roc_curve(y_true, y_probs)
+    """Find optimal threshold that maximizes F1 score (restored for better calibration)"""
+    _, _, thresholds = roc_curve(y_true, y_probs)
+    best_threshold = 0.5
+    best_f1 = 0
     
-    # Youden's J statistic: J = sensitivity + specificity - 1
-    # This is more robust for imbalanced datasets than F1 maximization
-    youden_scores = tpr - fpr
+    # Filter out extreme thresholds
+    valid_thresholds = [t for t in thresholds if 0.1 <= t <= 0.9]
     
-    # Find threshold that maximizes Youden's J
-    optimal_idx = np.argmax(youden_scores)
-    best_threshold = thresholds[optimal_idx]
-    
-    # Ensure threshold is reasonable (not too extreme)
-    best_threshold = np.clip(best_threshold, 0.1, 0.9)
+    for threshold in valid_thresholds:
+        y_pred = (y_probs >= threshold).astype(int)
+        try:
+            current_f1 = f1_score(y_true, y_pred, zero_division=0)
+            if current_f1 > best_f1:
+                best_f1 = current_f1
+                best_threshold = threshold
+        except:
+            continue
     
     return best_threshold
 

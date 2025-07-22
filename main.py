@@ -73,11 +73,13 @@ def main():
     for fold_idx, (train_pats, test_pats) in enumerate(splitter.folds):
         print(f"\n===== Fold {fold_idx} =====")
         print(f"Train patients: {len(train_pats)}, Test patients: {len(test_pats)}")
-        # Datasets with refined multi-image sampling (less aggressive)
+        # Datasets with MAXIMUM utilization sampling
+        from config import SAMPLES_PER_PATIENT_MAX, EPOCH_MULTIPLIER_MAX
         train_ds = MultiMagPatientDataset(
             patient_dict, train_pats, transform=train_transform,
-            samples_per_patient=3,  # Reduced from 5 to prevent overfitting
-            adaptive_sampling=True  # Use adaptive strategy based on available images
+            samples_per_patient=SAMPLES_PER_PATIENT_MAX,  # MAXIMUM sampling for training
+            epoch_multiplier=EPOCH_MULTIPLIER_MAX,     # 4x diverse combinations
+            adaptive_sampling=True  # Use MAXIMUM utilization strategy
         )
         test_ds = MultiMagPatientDataset(
             patient_dict, test_pats, transform=eval_transform,
@@ -112,35 +114,39 @@ def main():
         # Split training data into train/validation for nested CV (increased validation size)
         train_pats_inner, val_pats = train_test_split(train_pats, test_size=0.3, random_state=42, stratify=[train_ds.patient_dict[pid]['label'] for pid in train_pats])
         
-        # Create inner validation dataset (single sample for consistent validation)
+        # Create inner validation dataset with enhanced sampling
+        from config import VAL_SAMPLES_PER_PATIENT_MAX, EPOCH_MULTIPLIER_MAX
         val_ds = MultiMagPatientDataset(
             patient_dict, val_pats, transform=eval_transform,
-            samples_per_patient=1, adaptive_sampling=False
+            samples_per_patient=VAL_SAMPLES_PER_PATIENT_MAX,  # MAXIMUM sampling for validation
+            epoch_multiplier=EPOCH_MULTIPLIER_MAX//2,     # 2x diverse combinations for validation
+            adaptive_sampling=True  # Use MAXIMUM utilization strategy
         )
         val_loader = DataLoader(val_ds, batch_size=config['batch_size'], shuffle=False, 
                               num_workers=config['num_workers'], pin_memory=config['pin_memory'])
         
-        # Update training loader with reduced training set and refined sampling
+        # Update training loader with MAXIMUM utilization sampling
         train_ds_inner = MultiMagPatientDataset(
             patient_dict, train_pats_inner, transform=train_transform,
-            samples_per_patient=3,  # Reduced base samples per patient
-            adaptive_sampling=True
+            samples_per_patient=SAMPLES_PER_PATIENT_MAX,  # MAXIMUM sampling for inner training
+            epoch_multiplier=EPOCH_MULTIPLIER_MAX,     # 4x diverse combinations
+            adaptive_sampling=True  # Use MAXIMUM utilization strategy
         )
         
         # Adjust batch size for increased data volume
         inner_train_stats = train_ds_inner.get_sampling_stats()
         samples_per_epoch = inner_train_stats['total_samples_per_epoch']
         
-        # Dynamic batch size adjustment based on data volume
-        if samples_per_epoch > 2000:
-            # Large dataset: keep original batch size
-            effective_batch_size = config['batch_size']
-        elif samples_per_epoch > 1000:
-            # Medium dataset: slight increase
-            effective_batch_size = min(config['batch_size'] + 4, 32)
+        # Dynamic batch size adjustment for MAXIMUM utilization
+        target_batch_size = min(config['batch_size'] * 2, 32)  # Double batch size for larger datasets
+        
+        # Ensure batch size doesn't exceed reasonable limits for stability
+        if samples_per_epoch > 4000:
+            effective_batch_size = min(target_batch_size, 32)
+        elif samples_per_epoch > 2000:
+            effective_batch_size = min(target_batch_size, 24)
         else:
-            # Small dataset: increase batch size more
-            effective_batch_size = min(config['batch_size'] + 8, 32)
+            effective_batch_size = min(target_batch_size, 16)
             
         print(f"Inner training samples: {samples_per_epoch}, batch size: {effective_batch_size}")
         

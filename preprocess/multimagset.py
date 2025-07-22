@@ -9,7 +9,7 @@ import numpy as np
 
 class MultiMagPatientDataset(Dataset):
     def __init__(self, patient_dict, patient_ids, mags=['40', '100', '200', '400'], 
-                 transform=None, samples_per_patient=1, epoch_multiplier=1, 
+                 transform=None, samples_per_patient=1, epoch_multiplier=3, 
                  adaptive_sampling=True, class_balanced_sampling=True):
         """
         Enhanced dataset with multi-image sampling per patient
@@ -66,7 +66,7 @@ class MultiMagPatientDataset(Dataset):
         return stats
     
     def _compute_effective_samples(self):
-        """Compute effective number of samples per patient using adaptive strategy"""
+        """Compute effective number of samples per patient using MAXIMUM utilization strategy"""
         if not self.adaptive_sampling:
             return {pid: self.samples_per_patient for pid in self.patient_ids}
             
@@ -75,15 +75,16 @@ class MultiMagPatientDataset(Dataset):
             stats = self.patient_image_counts[pid]
             avg_images = stats['avg_per_mag']
             
+            # MAXIMUM utilization - use 80-95% of available images
             if avg_images <= 15:
-                # Low volume: moderate sampling to prevent overfitting
-                samples = min(int(avg_images * 0.6), self.samples_per_patient * 2)
+                # Low volume: aggressive sampling for maximum utilization
+                samples = min(int(avg_images * 0.9), self.samples_per_patient * 3)
             elif avg_images <= 30:
-                # Medium volume: conservative sampling
-                samples = min(int(avg_images * 0.4), self.samples_per_patient * 2)
+                # Medium volume: high sampling rate
+                samples = min(int(avg_images * 0.85), self.samples_per_patient * 3)
             else:
-                # High volume: very conservative sampling to prevent overfitting
-                samples = min(int(avg_images * 0.25), self.samples_per_patient * 2)
+                # High volume: still high sampling with safety margin
+                samples = min(int(avg_images * 0.8), self.samples_per_patient * 3)
                 
             effective[pid] = max(1, samples)  # At least 1 sample per patient
             
