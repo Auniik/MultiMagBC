@@ -26,7 +26,7 @@ def main():
 
     from utils.helpers import seed_everything
     config = get_training_config()
-    device = torch.device('cpu')
+    device = config['device']
     seed_everything(config['random_seed'])
     
     print(f"Using device: {device}")
@@ -43,6 +43,7 @@ def main():
         n_splits=5,
         stratify_subtype=False
     )
+    splitter.print_summary()
     patient_dict = splitter.patient_dict
 
     # Define transforms
@@ -70,7 +71,7 @@ def main():
         test_loader = DataLoader(test_ds, batch_size=config['batch_size'], shuffle=False, num_workers=config['num_workers'], pin_memory=config['pin_memory'])
 
         # Model, criterion, optimizer, scheduler
-        epochs = 5
+        epochs = 10
 
         model = MMNet().to(device)
         criterion = nn.CrossEntropyLoss()
@@ -82,9 +83,10 @@ def main():
             train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
             val_loss, val_acc, val_bal, val_f1, val_auc = eval_model(model, test_loader, criterion, device)
             scheduler.step()
-            print(f"Epoch {epoch:02d}:"
-                  f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} | "
-                  f"Val: Loss {val_loss:.4f}, Acc {val_acc:.3f}, BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}")
+            print(f"Epoch {epoch:02d}: \n"
+                  f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} \n"
+                  f"Val: Loss {val_loss:.4f}, Acc {val_acc:.3f}, \n"
+                  f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}")
             # Save best
             if val_bal > best_bal_acc:
                 best_bal_acc = val_bal
