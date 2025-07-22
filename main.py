@@ -12,7 +12,8 @@ import torch.optim as optim
 from backbones.our.model import MMNet
 from config import (SLIDES_PATH, LEARNING_RATE, NUM_EPOCHS, EARLY_STOPPING_PATIENCE, 
                     LR_SCHEDULER_PATIENCE, LR_SCHEDULER_FACTOR, DROPOUT_RATE, WEIGHT_DECAY,
-                    FOCAL_ALPHA, FOCAL_GAMMA, LABEL_SMOOTHING, FocalLoss, get_training_config, calculate_class_weights)
+                    FOCAL_ALPHA, FOCAL_GAMMA, LABEL_SMOOTHING, MIXUP_ALPHA, FocalLoss, 
+                    get_training_config, calculate_class_weights, mixup_data, mixup_criterion)
 from preprocess.kfold_splitter import PatientWiseKFoldSplitter
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
@@ -72,10 +73,10 @@ def main():
     for fold_idx, (train_pats, test_pats) in enumerate(splitter.folds):
         print(f"\n===== Fold {fold_idx} =====")
         print(f"Train patients: {len(train_pats)}, Test patients: {len(test_pats)}")
-        # Datasets with enhanced multi-image sampling
+        # Datasets with refined multi-image sampling (less aggressive)
         train_ds = MultiMagPatientDataset(
             patient_dict, train_pats, transform=train_transform,
-            samples_per_patient=5,  # Base samples per patient
+            samples_per_patient=3,  # Reduced from 5 to prevent overfitting
             adaptive_sampling=True  # Use adaptive strategy based on available images
         )
         test_ds = MultiMagPatientDataset(
@@ -108,8 +109,8 @@ def main():
             patience=LR_SCHEDULER_PATIENCE
         )
 
-        # Split training data into train/validation for nested CV
-        train_pats_inner, val_pats = train_test_split(train_pats, test_size=0.2, random_state=42, stratify=[train_ds.patient_dict[pid]['label'] for pid in train_pats])
+        # Split training data into train/validation for nested CV (increased validation size)
+        train_pats_inner, val_pats = train_test_split(train_pats, test_size=0.3, random_state=42, stratify=[train_ds.patient_dict[pid]['label'] for pid in train_pats])
         
         # Create inner validation dataset (single sample for consistent validation)
         val_ds = MultiMagPatientDataset(
@@ -119,10 +120,10 @@ def main():
         val_loader = DataLoader(val_ds, batch_size=config['batch_size'], shuffle=False, 
                               num_workers=config['num_workers'], pin_memory=config['pin_memory'])
         
-        # Update training loader with reduced training set and enhanced sampling
+        # Update training loader with reduced training set and refined sampling
         train_ds_inner = MultiMagPatientDataset(
             patient_dict, train_pats_inner, transform=train_transform,
-            samples_per_patient=5,  # Base samples per patient
+            samples_per_patient=3,  # Reduced base samples per patient
             adaptive_sampling=True
         )
         
@@ -164,8 +165,13 @@ def main():
         for epoch in range(1, epochs+1):
             # Set epoch for deterministic sampling diversity
             train_ds_inner.set_epoch(epoch)
-            train_loss, train_acc = train_one_epoch(model, train_loader_inner, criterion, optimizer, device)
-            val_loss, val_acc, val_bal, val_f1, val_auc, threshold = eval_model_with_threshold_optimization(model, val_loader, criterion, device)
+            train_loss, train_acc = train_one_epoch(
+                model, train_loader_inner, criterion, optimizer, device, 
+                use_mixup=True, mixup_alpha=MIXUP_ALPHA
+            )
+            val_loss, val_acc, val_bal, val_f1, val_auc, threshold = eval_model_with_threshold_optimization(
+                model, val_loader, criterion, device, use_dropout=True
+            )
             
             # Track losses for overfitting detection
             train_losses.append(train_loss)
@@ -176,16 +182,24 @@ def main():
             
             # Overfitting detection
             overfitting_warning = ""
+            perfect_validation_warning = ""
+            
+            # Check for perfect validation performance (sign of overfitting)
+            if val_bal >= 0.995 or val_auc >= 0.995:
+                perfect_validation_warning = " [PERFECT VAL - POSSIBLE OVERFITTING]"
+            
+            # Check for train-validation loss divergence
             if len(train_losses) >= overfitting_patience:
                 recent_train_loss = np.mean(train_losses[-overfitting_patience:])
                 recent_val_loss = np.mean(val_losses[-overfitting_patience:])
                 if recent_val_loss > recent_train_loss + overfitting_threshold:
-                    overfitting_warning = " [OVERFITTING WARNING]"
+                    overfitting_warning = " [TRAIN-VAL DIVERGENCE]"
             
             print(f"Epoch {epoch:02d}: "
                   f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} |"
                   f"Val: Loss {val_loss:.4f}, Acc {val_acc:.3f}, "
-                  f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}, Thresh {threshold:.3f}{overfitting_warning}")
+                  f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}, Thresh {threshold:.3f}"
+                  f"{overfitting_warning}{perfect_validation_warning}")
             
             # Save best model and implement early stopping
             if val_bal > best_val_bal_acc:

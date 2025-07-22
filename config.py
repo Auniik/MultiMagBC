@@ -14,16 +14,19 @@ MAGNIFICATIONS = ['40X', '100X', '200X', '400X']
 
 # Training settings
 NUM_EPOCHS = 25
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 5e-5  # Reduced for more stable training with enhanced sampling
 RANDOM_SEED = 42
 EARLY_STOPPING_PATIENCE = 7
 LR_SCHEDULER_PATIENCE = 3
 LR_SCHEDULER_FACTOR = 0.5
 
-# Regularization settings
-DROPOUT_RATE = 0.5
-WEIGHT_DECAY = 1e-3
-LABEL_SMOOTHING = 0.1
+# Enhanced regularization settings for multi-image sampling
+DROPOUT_RATE = 0.7  # Increased from 0.5 to combat overfitting
+WEIGHT_DECAY = 5e-3  # Increased from 1e-3 for stronger regularization
+LABEL_SMOOTHING = 0.2  # Increased from 0.1 to prevent overconfidence
+
+# Mixup augmentation settings
+MIXUP_ALPHA = 0.2  # Alpha parameter for mixup augmentation
 
 # Focal loss settings
 FOCAL_ALPHA = 0.7  # Weight for positive class
@@ -77,6 +80,30 @@ class FocalLoss(torch.nn.Module):
         focal_loss = focal_weight * ce_loss
         
         return focal_loss.mean()
+
+def mixup_data(x, y, alpha=0.2, device='cuda'):
+    """Implement mixup augmentation for enhanced regularization"""
+    import torch
+    import numpy as np
+    
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+    
+    batch_size = x['mag_40'].size(0)
+    index = torch.randperm(batch_size).to(device)
+    
+    mixed_x = {}
+    for mag_key in x.keys():
+        mixed_x[mag_key] = lam * x[mag_key] + (1 - lam) * x[mag_key][index, :]
+    
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    """Calculate mixup loss"""
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
 def calculate_class_weights(train_labels):
     """Calculate class weights for handling imbalanced dataset"""

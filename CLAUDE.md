@@ -45,8 +45,8 @@ MMNet is a Multi-Magnification Network for breast cancer histopathology classifi
 
 3. **Data Pipeline**:
    - `preprocess/multimagset.py`: Enhanced dataset class with adaptive multi-image sampling per patient
-     - **Adaptive Sampling Strategy**: Low-volume patients (≤15 imgs/mag) use ~80% of images, medium-volume (16-30) ~60%, high-volume (>30) ~40%
-     - **Multi-Image Support**: Samples multiple image combinations per patient to maximize data utilization (~5-6x increase in samples per epoch)
+     - **Adaptive Sampling Strategy**: Low-volume patients (≤15 imgs/mag) use ~60% of images, medium-volume (16-30) ~40%, high-volume (>30) ~25%
+     - **Multi-Image Support**: Samples 3 base images per patient with conservative utilization to prevent overfitting (~3-4x increase in samples per epoch)
      - **Deterministic Sampling**: Uses epoch-based seeding for reproducible yet diverse sampling across epochs
      - **Dynamic Batch Sizing**: Automatically adjusts batch sizes based on effective dataset size
    - `preprocess/kfold_splitter.py`: Patient-wise K-fold splitting to prevent data leakage
@@ -76,13 +76,13 @@ got the === Fold-wise Dataset Summary ===
 
 - **Device detection**: Automatically detects CUDA, MPS, or CPU (`config.py:get_device()`)
 - **Training config**: Adaptive batch sizes and worker counts based on device (`config.py:get_training_config()`)
-- **Hyperparameters**: Configurable in `config.py` (learning rate: 1e-4, epochs: 25, image size: 224x224)
-- **Advanced regularization**: Dropout 0.5, weight decay 1e-3, label smoothing 0.1
+- **Hyperparameters**: Configurable in `config.py` (learning rate: 5e-5, epochs: 25, image size: 224x224)
+- **Enhanced regularization**: Dropout 0.7, weight decay 5e-3, label smoothing 0.2, mixup augmentation α=0.2
 - **Focal loss**: Alpha=0.7, gamma=2.0 for better class imbalance handling
-- **Nested cross-validation**: Proper validation split to prevent threshold overfitting
+- **Nested cross-validation**: 30% validation split with validation dropout for proper regularization
 - **Early stopping**: Patience of 7 epochs based on validation balanced accuracy
 - **Learning rate scheduling**: ReduceLROnPlateau with patience of 3 epochs
-- **Overfitting detection**: Monitors train/validation loss gap with warnings
+- **Overfitting detection**: Monitors train/validation loss gap and perfect validation performance with warnings
 
 ## Key Features
 
@@ -134,10 +134,11 @@ Best models are saved per fold as `output/fold_{i}_best.pth` based on balanced a
 The model processes 4 images simultaneously (one per magnification), which requires sufficient GPU memory. Batch sizes are automatically adjusted based on available hardware.
 
 ## Major Improvements
-- **Enhanced Multi-Image Sampling**: Implemented adaptive sampling strategy that increases data utilization from ~4% to ~20-25% per epoch, using multiple images per patient based on availability
+- **Enhanced Multi-Image Sampling**: Implemented conservative adaptive sampling strategy that increases data utilization from ~4% to ~15-20% per epoch, with strong regularization to prevent overfitting
 - **Advanced Multi-Magnification Attention**: Implemented hierarchical attention mechanisms to learn relationships between magnification levels
 - **Patient-Wise Cross-Validation**: Developed robust splitting strategy to prevent data leakage and ensure realistic model evaluation
 - **Overfitting Prevention**: Comprehensive detection and prevention techniques, including early stopping, gradient clipping, and advanced regularization
-- **Enhanced Data Augmentation**: Medical-specific transforms including elastic deformation, rotation, and color jittering
-- **Focal Loss Implementation**: Better handling of class imbalance with label smoothing and alpha weighting
-- **Dynamic Training Pipeline**: Automatic batch size adjustment and epoch-based sampling diversity for optimal resource utilization
+- **Enhanced Data Augmentation**: Medical-specific transforms including elastic deformation, rotation, color jittering, and mixup augmentation
+- **Focal Loss Implementation**: Better handling of class imbalance with enhanced label smoothing and alpha weighting
+- **Strong Regularization Suite**: Increased dropout (0.7), weight decay (5e-3), validation dropout, and overfitting detection
+- **Dynamic Training Pipeline**: Conservative batch size adjustment and epoch-based sampling diversity with overfitting prevention

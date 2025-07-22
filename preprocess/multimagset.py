@@ -69,14 +69,14 @@ class MultiMagPatientDataset(Dataset):
             avg_images = stats['avg_per_mag']
             
             if avg_images <= 15:
-                # Low volume: use more samples to maximize data
-                samples = min(int(avg_images * 0.8), self.samples_per_patient * 3)
-            elif avg_images <= 30:
-                # Medium volume: moderate sampling
+                # Low volume: moderate sampling to prevent overfitting
                 samples = min(int(avg_images * 0.6), self.samples_per_patient * 2)
-            else:
-                # High volume: conservative sampling to prevent overfitting
+            elif avg_images <= 30:
+                # Medium volume: conservative sampling
                 samples = min(int(avg_images * 0.4), self.samples_per_patient * 2)
+            else:
+                # High volume: very conservative sampling to prevent overfitting
+                samples = min(int(avg_images * 0.25), self.samples_per_patient * 2)
                 
             effective[pid] = max(1, samples)  # At least 1 sample per patient
             
