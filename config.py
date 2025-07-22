@@ -61,5 +61,6 @@ def get_training_config():
         'learning_rate': LEARNING_RATE,
         'num_epochs': NUM_EPOCHS,
         'random_seed': RANDOM_SEED,
-        'pin_memory': True if device.type == 'cuda' else False
+        'pin_memory': True if device.type == 'cuda' else False,
+        'output_dir': OUTPUT_DIR
     }
