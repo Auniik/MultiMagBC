@@ -10,14 +10,17 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from backbones.our.model import MMNet
-from config import SLIDES_PATH, LEARNING_RATE, NUM_EPOCHS, EARLY_STOPPING_PATIENCE, LR_SCHEDULER_PATIENCE, LR_SCHEDULER_FACTOR, get_training_config, calculate_class_weights
+from config import (SLIDES_PATH, LEARNING_RATE, NUM_EPOCHS, EARLY_STOPPING_PATIENCE, 
+                    LR_SCHEDULER_PATIENCE, LR_SCHEDULER_FACTOR, DROPOUT_RATE, WEIGHT_DECAY,
+                    FOCAL_ALPHA, FOCAL_GAMMA, LABEL_SMOOTHING, FocalLoss, get_training_config, calculate_class_weights)
 from preprocess.kfold_splitter import PatientWiseKFoldSplitter
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
 
 
 from preprocess.multimagset import MultiMagPatientDataset
-from training.train_mm_k_fold import eval_model, train_one_epoch
+from training.train_mm_k_fold import eval_model, eval_model_with_threshold_optimization, train_one_epoch
+from sklearn.model_selection import train_test_split
 
 
 
@@ -46,14 +49,18 @@ def main():
     splitter.print_summary()
     patient_dict = splitter.patient_dict
 
-    # Define transforms
+    # Enhanced data augmentation for medical images
     train_transform = T.Compose([
         T.Resize((224, 224)),
-        T.RandomHorizontalFlip(),
-        T.RandomVerticalFlip(),
-        T.ColorJitter(0.1, 0.1, 0.1, 0.1),
+        T.RandomHorizontalFlip(p=0.5),
+        T.RandomVerticalFlip(p=0.5),
+        T.RandomRotation(degrees=15),  # Medical images can be rotated
+        T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.05),
+        T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))], p=0.3),
+        T.RandomApply([T.ElasticTransform(alpha=50.0, sigma=5.0)], p=0.2),  # Simulate tissue deformation
         T.ToTensor(),
-        T.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
+        T.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]),
+        T.RandomErasing(p=0.1, scale=(0.02, 0.08), ratio=(0.3, 3.3), value='random')  # Occlusion
     ])
     eval_transform = T.Compose([
         T.Resize((224, 224)),
@@ -68,7 +75,6 @@ def main():
         # Datasets & loaders
         train_ds = MultiMagPatientDataset(patient_dict, train_pats, transform=train_transform)
         test_ds = MultiMagPatientDataset(patient_dict, test_pats, transform=eval_transform)
-        train_loader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True, num_workers=config['num_workers'], pin_memory=config['pin_memory'], drop_last=True)
         test_loader = DataLoader(test_ds, batch_size=config['batch_size'], shuffle=False, num_workers=config['num_workers'], pin_memory=config['pin_memory'])
 
         # Calculate class weights for imbalanced dataset
@@ -79,36 +85,68 @@ def main():
         # Model, criterion, optimizer, scheduler
         epochs = NUM_EPOCHS
 
-        model = MMNet().to(device)
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-        optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+        model = MMNet(dropout=DROPOUT_RATE).to(device)
+        criterion = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, weight=class_weights, label_smoothing=LABEL_SMOOTHING)
+        optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', factor=LR_SCHEDULER_FACTOR, 
             patience=LR_SCHEDULER_PATIENCE
         )
 
-        best_bal_acc = 0
+        # Split training data into train/validation for nested CV
+        train_pats_inner, val_pats = train_test_split(train_pats, test_size=0.2, random_state=42, stratify=[train_ds.patient_dict[pid]['label'] for pid in train_pats])
+        
+        # Create inner validation dataset
+        val_ds = MultiMagPatientDataset(patient_dict, val_pats, transform=eval_transform)
+        val_loader = DataLoader(val_ds, batch_size=config['batch_size'], shuffle=False, num_workers=config['num_workers'], pin_memory=config['pin_memory'])
+        
+        # Update training loader with reduced training set
+        train_ds_inner = MultiMagPatientDataset(patient_dict, train_pats_inner, transform=train_transform)
+        train_loader_inner = DataLoader(train_ds_inner, batch_size=config['batch_size'], shuffle=True, num_workers=config['num_workers'], pin_memory=config['pin_memory'], drop_last=True)
+        
+        print(f"Inner split: Train {len(train_pats_inner)}, Val {len(val_pats)} patients")
+        
+        best_val_bal_acc = 0
         epochs_no_improve = 0
         best_model_state = None
+        optimal_threshold = 0.5
+        
+        # For overfitting detection
+        train_losses, val_losses = [], []
+        overfitting_patience = 5
+        overfitting_threshold = 0.1  # If val_loss > train_loss + threshold for multiple epochs
         
         for epoch in range(1, epochs+1):
-            train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
-            val_loss, val_acc, val_bal, val_f1, val_auc = eval_model(model, test_loader, criterion, device)
+            train_loss, train_acc = train_one_epoch(model, train_loader_inner, criterion, optimizer, device)
+            val_loss, val_acc, val_bal, val_f1, val_auc, threshold = eval_model_with_threshold_optimization(model, val_loader, criterion, device)
+            
+            # Track losses for overfitting detection
+            train_losses.append(train_loss)
+            val_losses.append(val_loss)
             
             # Step scheduler with validation balanced accuracy
             scheduler.step(val_bal)
             
+            # Overfitting detection
+            overfitting_warning = ""
+            if len(train_losses) >= overfitting_patience:
+                recent_train_loss = np.mean(train_losses[-overfitting_patience:])
+                recent_val_loss = np.mean(val_losses[-overfitting_patience:])
+                if recent_val_loss > recent_train_loss + overfitting_threshold:
+                    overfitting_warning = " [OVERFITTING WARNING]"
+            
             print(f"Epoch {epoch:02d}: "
                   f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} |"
                   f"Val: Loss {val_loss:.4f}, Acc {val_acc:.3f}, "
-                  f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}")
+                  f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}, Thresh {threshold:.3f}{overfitting_warning}")
             
             # Save best model and implement early stopping
-            if val_bal > best_bal_acc:
-                best_bal_acc = val_bal
+            if val_bal > best_val_bal_acc:
+                best_val_bal_acc = val_bal
                 best_model_state = model.state_dict().copy()
+                optimal_threshold = threshold
                 epochs_no_improve = 0
-                print(f"New best balanced accuracy: {best_bal_acc:.3f}")
+                print(f"New best validation balanced accuracy: {best_val_bal_acc:.3f}, threshold: {optimal_threshold:.3f}")
             else:
                 epochs_no_improve += 1
             
@@ -117,15 +155,18 @@ def main():
                 print(f"Early stopping after {epoch} epochs (no improvement for {EARLY_STOPPING_PATIENCE} epochs)")
                 break
         
-        # Save best model for this fold
+        # Load best model and evaluate on test set with optimized threshold
         if best_model_state is not None:
+            model.load_state_dict(best_model_state)
             ckpt_path = os.path.join(config['output_dir'], 'models', f"best_model_fold_{fold_idx}.pth")
             torch.save(best_model_state, ckpt_path)
-            print(f"Best model saved: {ckpt_path} (BalAcc: {best_bal_acc:.3f})")
-
-        # Use best metrics from this fold
-        _, final_val_acc, final_val_bal, final_val_f1, final_val_auc = eval_model(model, test_loader, criterion, device)
-        fold_metrics.append((final_val_acc, final_val_bal, final_val_f1, final_val_auc))
+            print(f"Best model saved: {ckpt_path} (Val BalAcc: {best_val_bal_acc:.3f})")
+        
+        # Final test evaluation with optimized threshold (NO threshold optimization on test set)
+        _, test_acc, test_bal, test_f1, test_auc, _ = eval_model(model, test_loader, criterion, device, optimal_threshold)
+        print(f"Test Results: Acc {test_acc:.3f}, BalAcc {test_bal:.3f}, F1 {test_f1:.3f}, AUC {test_auc:.3f} (threshold: {optimal_threshold:.3f})")
+        
+        fold_metrics.append((test_acc, test_bal, test_f1, test_auc))
     # Summary
     accs, bals, f1s, aucs = zip(*fold_metrics)
     print("\n=== Cross-Validation Results ===")

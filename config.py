@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn
 
 from utils.env import get_base_path
 
@@ -19,6 +20,15 @@ EARLY_STOPPING_PATIENCE = 7
 LR_SCHEDULER_PATIENCE = 3
 LR_SCHEDULER_FACTOR = 0.5
 
+# Regularization settings
+DROPOUT_RATE = 0.5
+WEIGHT_DECAY = 1e-3
+LABEL_SMOOTHING = 0.1
+
+# Focal loss settings
+FOCAL_ALPHA = 0.7  # Weight for positive class
+FOCAL_GAMMA = 2.0  # Focusing parameter
+
 # Model settings
 BACKBONE = 'efficientnet_b0'
 NUM_BINARY_CLASSES = 2
@@ -34,6 +44,39 @@ def get_device():
         return torch.device('mps')
     else:
         return torch.device('cpu')
+
+class FocalLoss(torch.nn.Module):
+    """Focal Loss for addressing class imbalance"""
+    def __init__(self, alpha=0.7, gamma=2.0, weight=None, label_smoothing=0.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.weight = weight
+        self.label_smoothing = label_smoothing
+        
+    def forward(self, inputs, targets):
+        # Apply label smoothing
+        if self.label_smoothing > 0:
+            num_classes = inputs.size(-1)
+            targets_onehot = torch.zeros_like(inputs).scatter(1, targets.unsqueeze(1), 1)
+            targets_smooth = targets_onehot * (1 - self.label_smoothing) + self.label_smoothing / num_classes
+            ce_loss = -(targets_smooth * torch.log_softmax(inputs, dim=1)).sum(dim=1)
+        else:
+            ce_loss = torch.nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
+        
+        # Calculate probabilities and focal weight
+        pt = torch.exp(-ce_loss)
+        
+        # Apply alpha weighting
+        if self.alpha is not None:
+            alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+            focal_weight = alpha_t * (1 - pt) ** self.gamma
+        else:
+            focal_weight = (1 - pt) ** self.gamma
+            
+        focal_loss = focal_weight * ce_loss
+        
+        return focal_loss.mean()
 
 def calculate_class_weights(train_labels):
     """Calculate class weights for handling imbalanced dataset"""
