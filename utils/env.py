@@ -22,3 +22,4 @@ def get_base_path():
     else:
         return "./data"
    
+        return "./data/breakhis/BreaKHis_v1/BreaKHis_v1/histology_slides/breast"

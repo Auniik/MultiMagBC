@@ -1,5 +1,5 @@
 from backbones.baseline_single import SimpleConcatBaseline
-from backbones.baseline_simple_concat import SimpleConcatBaseline
+from backbones.baseline import SimpleConcatBaseline
 from backbones.our.model import MMNet
 from config import MAGNIFICATIONS
 

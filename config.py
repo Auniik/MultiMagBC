@@ -1,13 +1,11 @@
-"""
-Simple Configuration for MMNet Pipeline
-"""
-
 import os
 import torch
 
-# Dataset paths
-DATA_BASE_PATH = './data/breakhis'
-SLIDES_PATH = 'BreaKHis_v1/BreaKHis_v1/histology_slides/breast'
+from utils.env import get_base_path
+
+DATASET_PATH = get_base_path() + "/breakhis"
+SLIDES_PATH = DATASET_PATH + "/BreaKHis_v1/BreaKHis_v1/histology_slides/breast"
+FOLDS_PATH = DATASET_PATH + "/Folds.csv"
 
 # Image settings
 IMAGE_SIZE = 224
@@ -19,10 +17,9 @@ LEARNING_RATE = 1e-4
 RANDOM_SEED = 42
 
 # Model settings
-BACKBONE = 'resnet50'
-FEATURE_DIM = 512
+BACKBONE = 'efficientnet_b0'
 NUM_BINARY_CLASSES = 2
-NUM_SUBTYPE_CLASSES = 9
+NUM_SUBTYPE_CLASSES = 8
 
 # Output paths
 OUTPUT_DIR = './output'

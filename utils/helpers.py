@@ -1,6 +1,4 @@
-"""
-Utility Functions for MMNet
-"""
+
 
 import os
 import random
@@ -11,7 +9,6 @@ import torch
 from config import OUTPUT_DIR
 
 def seed_everything(seed=42):
-    """Set random seeds for reproducibility"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

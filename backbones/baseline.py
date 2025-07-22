@@ -17,3 +17,12 @@ class SimpleConcatBaseline(nn.Module):
         feats = [self.backbone(images_dict[f'mag_{m}']) for m in MAGNIFICATIONS]
         concat_feat = torch.cat(feats, dim=1)
         return self.classifier(concat_feat)
+    
+
+class BaselineSingleMag(nn.Module):
+    def __init__(self, backbone_name='efficientnet_b0', num_classes=2):
+        super().__init__()
+        self.backbone = timm.create_model(backbone_name, pretrained=True, num_classes=num_classes)
+    
+    def forward(self, x):
+        return self.backbone(x)

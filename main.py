@@ -11,7 +11,6 @@ from config import get_training_config
 
 def main():
     print("MMNet - Multi-Magnification Network for Breast Cancer Classification")
-    print("=" * 60)
 
     from utils.helpers import seed_everything
     config = get_training_config()
@@ -25,8 +24,6 @@ def main():
     print("\nDataset Analysis:")
     from preprocess.analyze import analyze_dataset
     analyze_dataset()
-    
-    print("\nTo start training: python train.py")
 
 
 if __name__ == "__main__":
