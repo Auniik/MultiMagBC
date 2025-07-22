@@ -25,15 +25,15 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
         # Apply moderate mixup augmentation
         if use_mixup and mixup_alpha > 0:
             mixed_images, y_a, y_b, lam = mixup_data(images, labels, mixup_alpha, device)
-            logits, _ = model(mixed_images)
+            logits = model(mixed_images)
             loss = mixup_criterion(criterion, logits, y_a, y_b, lam)
             
             # For accuracy calculation, use original labels
             with torch.no_grad():
-                orig_logits, _ = model(images)
+                orig_logits = model(images)
                 preds = torch.argmax(orig_logits, dim=1).cpu().numpy()
         else:
-            logits, _ = model(images)
+            logits = model(images)
             loss = criterion(logits, labels)
             preds = torch.argmax(logits, dim=1).cpu().numpy()
         
@@ -95,7 +95,7 @@ def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
         for images_dict, labels in tqdm(dataloader, desc='Eval ', leave=False):
             images = {k: v.to(device) for k, v in images_dict.items()}
             labels = labels.to(device)
-            logits, _ = model(images)
+            logits = model(images)
             loss = criterion(logits, labels)
 
             losses.append(loss.item())
@@ -130,7 +130,7 @@ def eval_model_with_threshold_optimization(model, dataloader, criterion, device,
         for images_dict, labels in tqdm(dataloader, desc='Val ', leave=False):
             images = {k: v.to(device) for k, v in images_dict.items()}
             labels = labels.to(device)
-            logits, _ = model(images)
+            logits = model(images)
             loss = criterion(logits, labels)
 
             losses.append(loss.item())
