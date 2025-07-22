@@ -1,7 +1,7 @@
-output/*.pth
-output/*.csv
-output/*.png
-output/*.jpg
+output/**/*.pth
+output/**/*.csv
+output/**/*.png
+output/**/*.jpg
 data/
 .DS_Store
 .venv/
