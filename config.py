@@ -26,7 +26,7 @@ GRADIENT_ACCUMULATION_STEPS = 2  # Effective batch size = 16 * 2 = 32
 # Enhanced regularization settings for balanced utilization
 DROPOUT_RATE = 0.75  # Increased to prevent overfitting with more data
 WEIGHT_DECAY = 3e-3  # Moderate increase for better generalization
-LABEL_SMOOTHING = 0.15  # Balanced smoothing to prevent overconfidence
+LABEL_SMOOTHING = 0.1  # Balanced smoothing to prevent overconfidence
 
 # Mixup augmentation settings
 MIXUP_ALPHA = 0.2  # Reverted from 0.4 - moderate augmentation

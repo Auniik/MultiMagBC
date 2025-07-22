@@ -15,6 +15,7 @@ from config import (SLIDES_PATH, LEARNING_RATE, NUM_EPOCHS, EARLY_STOPPING_PATIE
                     LR_SCHEDULER_PATIENCE, LR_SCHEDULER_FACTOR, DROPOUT_RATE, WEIGHT_DECAY,
                     FOCAL_ALPHA, FOCAL_GAMMA, LABEL_SMOOTHING, MIXUP_ALPHA, FocalLoss, 
                     get_training_config, calculate_class_weights, mixup_data, mixup_criterion)
+from evaluate.gradcam import plot_and_save_gradcam
 from preprocess.kfold_splitter import PatientWiseKFoldSplitter
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
@@ -239,6 +240,8 @@ def main():
         importance = model.get_magnification_importance()
         print(f"📌 Final Magnification Importance (Fold {fold_idx}): {importance}")
 
+        plot_and_save_gradcam(model, val_loader, device, fold_idx)
+
         fold_metrics.append((test_acc, test_bal, test_f1, test_auc))
         importance_scores.append({
             'fold': fold_idx,
@@ -255,6 +258,7 @@ def main():
     print(f"AUC: {np.mean(aucs):.3f} ± {np.std(aucs):.3f}")
     print(f"Precision: {np.mean([bals[i] for i in range(len(bals)) if accs[i] > 0.5]):.3f} ± {np.std([bals[i] for i in range(len(bals)) if accs[i] > 0.5]):.3f}")
     print(f"Recall: {np.mean([bals[i] for i in range(len(bals)) if accs[i] > 0.5]):.3f} ± {np.std([bals[i] for i in range(len(bals)) if accs[i] > 0.5]):.3f}")
+    
 
 
 
