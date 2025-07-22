@@ -39,7 +39,7 @@ python -c "import numpy; print(f'✅ NumPy: {numpy.__version__}')" || echo "❌ 
 
 # Install only missing dependencies
 echo "📚 Installing additional project dependencies..."
-pip install -r requirements.txt.runpod
+pip install -r requirements.runpod
 
 # Verify CUDA installation
 echo ""
