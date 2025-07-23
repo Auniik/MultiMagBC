@@ -4,9 +4,13 @@ Main entry point for data analysis and training
 """
 
 import os
-from typing import Any
+import json
+import csv
+import time
+from typing import Any, Dict, List
 import numpy as np
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, roc_curve
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -166,10 +170,12 @@ def main():
         best_model_state = None
         optimal_threshold = 0.5
         
-        # For overfitting detection
+        # Track metrics for learning curves and analysis
         train_losses, val_losses = [], []
+        train_accuracies, val_accuracies = []
+        val_metrics_history = []
         overfitting_patience = 5
-        overfitting_threshold = 0.1  # If val_loss > train_loss + threshold for multiple epochs
+        overfitting_threshold = 0.1
         
         for epoch in range(1, epochs+1):
             # Set epoch for deterministic sampling diversity
@@ -182,12 +188,21 @@ def main():
                 model, val_loader, criterion, device, use_dropout=True
             )
             
-            # Track losses for overfitting detection
+            # Track metrics for learning curves
             train_losses.append(train_loss)
+            train_accuracies.append(train_acc)
             val_losses.append(val_loss)
+            val_accuracies.append(val_acc)
+            val_metrics_history.append({
+                'epoch': epoch,
+                'val_acc': val_acc,
+                'val_bal': val_bal,
+                'val_f1': val_f1,
+                'val_auc': val_auc,
+                'val_prec': val_prec,
+                'val_rec': val_rec
+            })
             
-            # Step scheduler with validation balanced accuracy
-            scheduler.step(val_bal)
             
             # Overfitting detection
             overfitting_warning = ""
@@ -243,6 +258,10 @@ def main():
         from sklearn.metrics import confusion_matrix
         test_labels = [test_ds.patient_dict[pid]['label'] for pid in test_pats]
         test_preds = []
+        test_probs = []
+        
+        # Track inference time
+        inference_start = time.time()
         with torch.no_grad():
             for images_dict, labels in test_loader:
                 images = {k: v.to(device) for k, v in images_dict.items()}
@@ -254,14 +273,72 @@ def main():
                 probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
                 preds = (probs >= optimal_threshold).astype(int)
                 test_preds.extend(preds)
+                test_probs.extend(probs)
+        inference_time = time.time() - inference_start
+        avg_inference_time = inference_time / len(test_ds)
         
         cm = confusion_matrix(test_labels, test_preds)
         print(f"📊 Confusion Matrix (Fold {fold_idx}):")
         print(f"   [[TN: {cm[0,0]:3d}, FP: {cm[0,1]:3d}]")
         print(f"    [FN: {cm[1,0]:3d}, TP: {cm[1,1]:3d}]]")
+        print(f"⚡ Avg Inference Time: {avg_inference_time:.4f}s per sample")
+        
+        # Generate ROC curve data
+        fpr, tpr, thresholds = roc_curve(test_labels, test_probs)
+        
+        # Save fold results
+        fold_results = {
+            'fold': fold_idx,
+            'test_accuracy': test_acc,
+            'test_balanced_accuracy': test_bal,
+            'test_f1': test_f1,
+            'test_auc': test_auc,
+            'test_precision': test_prec,
+            'test_recall': test_rec,
+            'optimal_threshold': optimal_threshold,
+            'confusion_matrix': cm.tolist(),
+            'inference_time': avg_inference_time,
+            'roc_data': {
+                'fpr': fpr.tolist(),
+                'tpr': tpr.tolist(),
+                'thresholds': thresholds.tolist()
+            },
+            'magnification_importance': importance,
+            'training_history': {
+                'train_losses': train_losses,
+                'train_accuracies': train_accuracies,
+                'val_losses': val_losses,
+                'val_accuracies': val_accuracies,
+                'val_metrics': val_metrics_history
+            },
+            'train_patients': len(train_pats),
+            'test_patients': len(test_pats),
+            'train_samples': len(train_ds_inner),
+            'test_samples': len(test_ds)
+        }
+        
+        # Save to JSON
+        results_dir = os.path.join(config['output_dir'], 'results')
+        os.makedirs(results_dir, exist_ok=True)
+        
+        json_path = os.path.join(results_dir, f'fold_{fold_idx}_results.json')
+        with open(json_path, 'w') as f:
+            json.dump(fold_results, f, indent=2)
+        
+        # Save to CSV summary
+        csv_path = os.path.join(results_dir, 'results_summary.csv')
+        csv_exists = os.path.exists(csv_path)
+        with open(csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            if not csv_exists:
+                writer.writerow(['fold', 'accuracy', 'balanced_accuracy', 'f1', 'auc', 'precision', 'recall', 'threshold', 'inference_time', 'train_patients', 'test_patients'])
+            writer.writerow([fold_idx, test_acc, test_bal, test_f1, test_auc, test_prec, test_rec, optimal_threshold, avg_inference_time, len(train_pats), len(test_pats)])
         
         importance = model.get_magnification_importance()
         print(f"📌 Final Magnification Importance (Fold {fold_idx}): {importance}")
+        print(f"💾 Results saved to: {json_path}")
+        
+        fold_metrics.append((test_acc, test_bal, test_f1, test_auc, test_prec, test_rec))
 
         # Generate GradCAM visualizations for this fold
         print(f"\n📊 Generating GradCAM visualizations for fold {fold_idx}...")
