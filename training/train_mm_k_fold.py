@@ -1,6 +1,6 @@
 
 import numpy as np
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score, roc_curve
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score, roc_curve, precision_score, recall_score, confusion_matrix
 import torch
 from tqdm import tqdm
 import torch.nn as nn
@@ -110,8 +110,10 @@ def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
     bal_acc = balanced_accuracy_score(all_labels, all_preds)
     f1 = f1_score(all_labels, all_preds)
     auc = roc_auc_score(all_labels, all_probs)
+    precision = precision_score(all_labels, all_preds)
+    recall = recall_score(all_labels, all_preds)
     
-    return np.mean(losses), acc, bal_acc, f1, auc, all_probs
+    return np.mean(losses), acc, bal_acc, f1, auc, precision, recall, all_probs
 
 def eval_model_with_threshold_optimization(model, dataloader, criterion, device, use_dropout=True):
     """Evaluate model and find optimal threshold with enhanced overfitting detection"""
@@ -152,5 +154,7 @@ def eval_model_with_threshold_optimization(model, dataloader, criterion, device,
     bal_acc = balanced_accuracy_score(all_labels, all_preds)
     f1 = f1_score(all_labels, all_preds)
     auc = roc_auc_score(all_labels, all_probs)
+    precision = precision_score(all_labels, all_preds)
+    recall = recall_score(all_labels, all_preds)
     
-    return np.mean(losses), acc, bal_acc, f1, auc, optimal_threshold
+    return np.mean(losses), acc, bal_acc, f1, auc, precision, recall, optimal_threshold

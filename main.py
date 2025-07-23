@@ -178,7 +178,7 @@ def main():
                 model, train_loader_inner, criterion, optimizer, device, 
                 use_mixup=True, mixup_alpha=MIXUP_ALPHA
             )
-            val_loss, val_acc, val_bal, val_f1, val_auc, threshold = eval_model_with_threshold_optimization(
+            val_loss, val_acc, val_bal, val_f1, val_auc, val_prec, val_rec, threshold = eval_model_with_threshold_optimization(
                 model, val_loader, criterion, device, use_dropout=True
             )
             
@@ -207,7 +207,8 @@ def main():
             print(f"Epoch {epoch:02d}: "
                   f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} | "
                   f"Val: Loss {val_loss:.4f}, Acc {val_acc:.3f}, "
-                  f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}, Thresh {threshold:.3f} | LR: {optimizer.param_groups[0]['lr']:.6f} "
+                  f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}, "
+                  f"Prec {val_prec:.3f}, Rec {val_rec:.3f}, Thresh {threshold:.3f} | LR: {optimizer.param_groups[0]['lr']:.6f} "
                   f"{overfitting_warning}{perfect_validation_warning}")
             
             if val_bal > best_val_bal_acc:
@@ -234,9 +235,31 @@ def main():
             print(f"✅ Best model saved: {ckpt_path} (Val BalAcc: {best_val_bal_acc:.3f})")
         
         # Final test evaluation with optimized threshold (NO threshold optimization on test set)
-        _, test_acc, test_bal, test_f1, test_auc, _ = eval_model(model, test_loader, criterion, device, optimal_threshold)
+        _, test_acc, test_bal, test_f1, test_auc, test_prec, test_rec, _ = eval_model(model, test_loader, criterion, device, optimal_threshold)
 
-        print(f"⚡️ Test Results: Acc {test_acc:.3f}, BalAcc {test_bal:.3f}, F1 {test_f1:.3f}, AUC {test_auc:.3f} (threshold: {optimal_threshold:.3f})")
+        print(f"⚡️ Test Results: Acc {test_acc:.3f}, BalAcc {test_bal:.3f}, F1 {test_f1:.3f}, AUC {test_auc:.3f}, Precision {test_prec:.3f}, Recall {test_rec:.3f} (threshold: {optimal_threshold:.3f})")
+        
+        # Generate confusion matrix for this fold
+        from sklearn.metrics import confusion_matrix
+        test_labels = [test_ds.patient_dict[pid]['label'] for pid in test_pats]
+        test_preds = []
+        with torch.no_grad():
+            for images_dict, labels in test_loader:
+                images = {k: v.to(device) for k, v in images_dict.items()}
+                outputs = model(images)
+                if isinstance(outputs, tuple):
+                    logits = outputs[0]
+                else:
+                    logits = outputs
+                probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+                preds = (probs >= optimal_threshold).astype(int)
+                test_preds.extend(preds)
+        
+        cm = confusion_matrix(test_labels, test_preds)
+        print(f"📊 Confusion Matrix (Fold {fold_idx}):")
+        print(f"   [[TN: {cm[0,0]:3d}, FP: {cm[0,1]:3d}]")
+        print(f"    [FN: {cm[1,0]:3d}, TP: {cm[1,1]:3d}]]")
+        
         importance = model.get_magnification_importance()
         print(f"📌 Final Magnification Importance (Fold {fold_idx}): {importance}")
 
@@ -286,15 +309,15 @@ def main():
             'optimal_threshold': optimal_threshold
         })
     
-    # Summary
-    accs, bals, f1s, aucs = zip(*fold_metrics)
+# Summary with all metrics
+    accs, bals, f1s, aucs, precs, recs = zip(*[(acc, bal, f1, auc, prec, rec) for acc, bal, f1, auc, prec, rec in fold_metrics])
     print("\n=== Cross-Validation Results ===")
-    print(f"Acc: {np.mean(accs):.3f} ± {np.std(accs):.3f}")
-    print(f"BalAcc: {np.mean(bals):.3f} ± {np.std(bals):.3f}")
-    print(f"F1: {np.mean(f1s):.3f} ± {np.std(f1s):.3f}")
-    print(f"AUC: {np.mean(aucs):.3f} ± {np.std(aucs):.3f}")
-    print(f"Precision: {np.mean([bals[i] for i in range(len(bals)) if accs[i] > 0.5]):.3f} ± {np.std([bals[i] for i in range(len(bals)) if accs[i] > 0.5]):.3f}")
-    print(f"Recall: {np.mean([bals[i] for i in range(len(bals)) if accs[i] > 0.5]):.3f} ± {np.std([bals[i] for i in range(len(bals)) if accs[i] > 0.5]):.3f}")
+    print(f"Acc:      {np.mean(accs):.3f} ± {np.std(accs):.3f}")
+    print(f"BalAcc:   {np.mean(bals):.3f} ± {np.std(bals):.3f}")
+    print(f"F1:       {np.mean(f1s):.3f} ± {np.std(f1s):.3f}")
+    print(f"AUC:      {np.mean(aucs):.3f} ± {np.std(aucs):.3f}")
+    print(f"Precision: {np.mean(precs):.3f} ± {np.std(precs):.3f}")
+    print(f"Recall:    {np.mean(recs):.3f} ± {np.std(recs):.3f}")
     
 
 
