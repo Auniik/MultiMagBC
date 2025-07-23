@@ -91,7 +91,8 @@ def main():
         test_ds = MultiMagPatientDataset(
             patient_dict, test_pats, transform=eval_transform,
             samples_per_patient=1,  # Keep single sample for consistent evaluation
-            adaptive_sampling=False
+            adaptive_sampling=False,
+            epoch_multiplier=1 
         )
         
         # Print sampling statistics
