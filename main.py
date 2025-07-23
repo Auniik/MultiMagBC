@@ -172,7 +172,7 @@ def main():
         
         # Track metrics for learning curves and analysis
         train_losses, val_losses = [], []
-        train_accuracies, val_accuracies = []
+        train_accuracies, val_accuracies = [], []
         val_metrics_history = []
         overfitting_patience = 5
         overfitting_threshold = 0.1
