@@ -352,42 +352,51 @@ def main():
         
         # Generate for first 3 test samples
         gradcam_count = 0
-        for i, (images_dict, labels) in enumerate(test_loader):
-            if i >= 3: 
-                break
-                
-            images = {k: v.to(device) for k, v in images_dict.items()}
-            labels = labels.to(device)
-            with torch.no_grad():
-                outputs = model(images)
-                if isinstance(outputs, tuple):
-                    logits = outputs[0]  # Binary classification output
-                else:
-                    logits = outputs
-                _, predicted = logits.max(1)
+        sample_idx = 0
+        for images_dict, labels in test_loader:
+            batch_size = labels.size(0)
             
-            cams = gradcam.get_cam(images, target_class=predicted.item())
-            save_path = os.path.join(gradcam_dir, f'fold_{fold_idx}_sample_{i}.png')
-            visualize_gradcam(
-                cams, 
-                images, 
-                true_label=labels.item(),
-                pred_label=predicted.item(),
-                save_path=save_path,
-                show=False
-            )
-            gradcam_count += 1
+            for j in range(batch_size):
+                if sample_idx >= 3:
+                    break
+                    
+                # Extract individual sample
+                single_images = {k: v[j:j+1].to(device) for k, v in images_dict.items()}
+                single_label = labels[j:j+1].to(device)
+                
+                with torch.no_grad():
+                    outputs = model(single_images)
+                    if isinstance(outputs, tuple):
+                        logits = outputs[0]
+                    else:
+                        logits = outputs
+                    _, predicted = logits.max(1)
+                
+                cams = gradcam.get_cam(single_images, target_class=predicted.item())
+                save_path = os.path.join(gradcam_dir, f'fold_{fold_idx}_sample_{sample_idx}.png')
+                visualize_gradcam(
+                    cams, 
+                    single_images, 
+                    true_label=single_label.item(),
+                    pred_label=predicted.item(),
+                    save_path=save_path,
+                    show=False
+                )
+                sample_idx += 1
+                gradcam_count += 1
+            
+            if sample_idx >= 3:
+                break
         
         print(f"✅ Generated {gradcam_count} GradCAM visualizations for fold {fold_idx}")
 
-        fold_metrics.append((test_acc, test_bal, test_f1, test_auc))
         importance_scores.append({
             'fold': fold_idx,
             'importance': importance,
             'optimal_threshold': optimal_threshold
         })
     
-# Summary with all metrics
+    # Summary with all metrics
     accs, bals, f1s, aucs, precs, recs = zip(*[(acc, bal, f1, auc, prec, rec) for acc, bal, f1, auc, prec, rec in fold_metrics])
     print("\n=== Cross-Validation Results ===")
     print(f"Acc:      {np.mean(accs):.3f} ± {np.std(accs):.3f}")
