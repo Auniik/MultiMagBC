@@ -15,7 +15,7 @@ from config import (SLIDES_PATH, LEARNING_RATE, NUM_EPOCHS, EARLY_STOPPING_PATIE
                     LR_SCHEDULER_PATIENCE, LR_SCHEDULER_FACTOR, DROPOUT_RATE, WEIGHT_DECAY,
                     FOCAL_ALPHA, FOCAL_GAMMA, LABEL_SMOOTHING, MIXUP_ALPHA, FocalLoss, 
                     get_training_config, calculate_class_weights, mixup_data, mixup_criterion)
-from evaluate.gradcam import plot_and_save_gradcam
+from evaluate.gradcam import GradCAM, visualize_gradcam
 from preprocess.kfold_splitter import PatientWiseKFoldSplitter
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
@@ -240,7 +240,44 @@ def main():
         importance = model.get_magnification_importance()
         print(f"📌 Final Magnification Importance (Fold {fold_idx}): {importance}")
 
-        plot_and_save_gradcam(model, val_loader, device, fold_idx)
+        # Generate GradCAM visualizations for this fold
+        print(f"\n📊 Generating GradCAM visualizations for fold {fold_idx}...")
+        gradcam = GradCAM(model)
+        model.eval()
+        
+        # Create gradcam output directory
+        gradcam_dir = os.path.join(config['output_dir'], 'gradcam')
+        os.makedirs(gradcam_dir, exist_ok=True)
+        
+        # Generate for first 3 test samples
+        gradcam_count = 0
+        for i, (images_dict, labels) in enumerate(test_loader):
+            if i >= 3: 
+                break
+                
+            images = {k: v.to(device) for k, v in images_dict.items()}
+            labels = labels.to(device)
+            with torch.no_grad():
+                outputs = model(images)
+                if isinstance(outputs, tuple):
+                    logits = outputs[0]  # Binary classification output
+                else:
+                    logits = outputs
+                _, predicted = logits.max(1)
+            
+            cams = gradcam.get_cam(images, target_class=predicted.item())
+            save_path = os.path.join(gradcam_dir, f'fold_{fold_idx}_sample_{i}.png')
+            visualize_gradcam(
+                cams, 
+                images, 
+                true_label=labels.item(),
+                pred_label=predicted.item(),
+                save_path=save_path,
+                show=False
+            )
+            gradcam_count += 1
+        
+        print(f"✅ Generated {gradcam_count} GradCAM visualizations for fold {fold_idx}")
 
         fold_metrics.append((test_acc, test_bal, test_f1, test_auc))
         importance_scores.append({

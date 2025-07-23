@@ -29,13 +29,28 @@ class GradCAM:
 
         # Forward
         outputs = self.model(images_dict_grad)
-        logits = outputs[1] if use_tumor_head else outputs[0]
+        if isinstance(outputs, tuple):
+            logits = outputs[1] if use_tumor_head else outputs[0]
+        else:
+            logits = outputs
+
+        # Ensure logits is 2D for binary classification [batch_size, 2] or [batch_size, 1]
+        if len(logits.shape) == 1:
+            # Single output - reshape to [batch_size, 1]
+            logits = logits.unsqueeze(-1)
+            # For binary classification, we need to create [batch_size, 2]
+            logits = torch.cat([1 - torch.sigmoid(logits), torch.sigmoid(logits)], dim=1)
 
         if target_class is None:
             target_class = logits.argmax(dim=1)
 
         self.model.zero_grad()
-        class_score = logits[:, target_class].sum() 
+        # Handle target_class properly
+        if isinstance(target_class, torch.Tensor):
+            target_class = target_class.item()
+        
+        # Ensure we have proper indexing
+        class_score = logits[0, target_class] if logits.shape[0] == 1 else logits[:, target_class].sum() 
 
         grads = {}
         for mag in ['40', '100', '200', '400']:
@@ -86,7 +101,7 @@ def visualize_gradcam(cam_dict, images_dict, true_label=None, pred_label=None, s
         img_np = (img_np * 255).astype(np.uint8)
 
         cam_resized = cv2.resize(cam, (img_np.shape[1], img_np.shape[0]))
-        heatmap = cv2.applyColorMap(np.uint8(255 * cam_resized), cv2.COLORMAP_JET)
+        heatmap = cv2.applyColorMap((255 * cam_resized).astype(np.uint8), cv2.COLORMAP_JET)
         overlay = cv2.addWeighted(img_np, 0.6, heatmap, 0.4, 0)
 
         # Raw image
@@ -106,10 +121,7 @@ def visualize_gradcam(cam_dict, images_dict, true_label=None, pred_label=None, s
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    # if show:
-        # plt.show()
-    else:
-        plt.close()
+    plt.close()
 
 
 def plot_and_save_gradcam(model, val_loader, device, fold):
