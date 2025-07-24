@@ -6,8 +6,10 @@ import torch
 from tqdm import tqdm
 import torch.nn as nn
 from config import mixup_data, mixup_criterion
-from utils.helpers import safe_autocast
+from utils.helpers import kl_divergence_uniform, safe_autocast
 
+
+KL_LAMBDA = 0.05  # regularization strength (tune 0.01–0.1)
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=True, mixup_alpha=0.2, accumulation_steps=1):
     model.train()
@@ -24,17 +26,21 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
         with safe_autocast(device):  # AMP for forward pass
             if use_mixup and mixup_alpha > 0:
                 mixed_images, y_a, y_b, lam = mixup_data(images, labels, mixup_alpha, device)
-                logits = model(mixed_images, mask)
-                loss = mixup_criterion(criterion, logits, y_a, y_b, lam)
+                logits, mag_weights = model(mixed_images, mask)
+                cls_loss = mixup_criterion(criterion, logits, y_a, y_b, lam)
                 lam_tensor = torch.full_like(y_a, lam)
                 dominant_labels = torch.where(lam_tensor >= 0.5, y_a, y_b)
                 preds = torch.argmax(logits, dim=1).cpu().numpy()
                 all_labels.extend(dominant_labels.cpu().numpy())
             else:
-                logits = model(images, mask)
-                loss = criterion(logits, labels)
+                logits, mag_weights = model(images, mask)
+                cls_loss = criterion(logits, labels)
                 preds = torch.argmax(logits, dim=1).cpu().numpy()
                 all_labels.extend(labels.cpu().numpy())
+
+            # --- KL Regularization ---
+            kl_loss = kl_divergence_uniform(mag_weights.squeeze(-1))  # ensure shape [B, mags]
+            loss = cls_loss + KL_LAMBDA * kl_loss
 
         all_preds.extend(preds)
 
@@ -50,7 +56,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
 
         losses.append(float(loss))
 
-    # Handle leftover gradients if dataloader length not divisible by accumulation_steps
+    # Handle leftover gradients
     if len(dataloader) % accumulation_steps != 0:
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         scaler.step(optimizer)

@@ -124,6 +124,8 @@ class CrossMagFusion(nn.Module):
         super().__init__()
         self.num_mags = len(channels_list)
 
+        self.temperature = nn.Parameter(torch.tensor(0.5))
+
         # Align features to a common dimension
         self.align_blocks = nn.ModuleList([
             nn.Sequential(
@@ -148,22 +150,21 @@ class CrossMagFusion(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(output_channels * 2, output_channels)
         )
-
+    
     def forward(self, *features_list, mask=None):
         # Align features
         aligned_feats = []
         for feat, align in zip(features_list, self.align_blocks):
-            if feat.ndim == 1: 
+            if feat.ndim == 1:
                 feat = feat.unsqueeze(0)
             aligned_feats.append(align(feat))
         aligned_feats = torch.stack(aligned_feats, dim=1)  # [B, mags, C]
 
-        # Magnification weights (softmax)
+        # Magnification weights
         raw_weights = self.mag_importance_mlp(aligned_feats)  # [B, mags, 1]
-        temperature = 0.5
-        weights = F.softmax(raw_weights / temperature, dim=1)
 
-        # Apply mask if available
+        weights = F.softmax(raw_weights / self.temperature.clamp(0.1, 1.0), dim=1)
+
         if mask is not None:
             mask = mask.unsqueeze(-1)
             weights = weights * mask
@@ -173,9 +174,10 @@ class CrossMagFusion(nn.Module):
         weighted_feats = aligned_feats * weights
 
         # Flatten & fuse
-        concat_feat = weighted_feats.flatten(start_dim=1)  # [B, mags*C]
+        concat_feat = weighted_feats.flatten(start_dim=1)
         fused_feat = self.fusion(concat_feat)
-        return fused_feat
+
+        return fused_feat, weights
 
 
 class MMNet(nn.Module):
@@ -225,7 +227,6 @@ class MMNet(nn.Module):
         )
     
     def forward(self, images_dict, mask=None):
-        # Extract features per magnification
         channel_outs = {}
         for mag in self.magnifications:
             x = images_dict[f'mag_{mag}']
@@ -234,19 +235,14 @@ class MMNet(nn.Module):
             x, _ = self.spatial_att[f'sp_att_{mag}x'](x)
             channel_outs[mag] = x
 
-        # Hierarchical magnification attention
         hier_feats = self.hierarchical_attn(channel_outs)
-        
-        # Convert dict → ordered list for fusion
         features_list = [hier_feats[mag] for mag in self.magnifications]
 
-        # Cross-magnification fusion (now fully integrated)
-        fused = self.cross_mag_fusion(*features_list, mask=mask)
+        fused, weights = self.cross_mag_fusion(*features_list, mask=mask)  # now returns both
         fused = self.dropout(fused)
 
-        # Classification head
         logits = self.classifier(fused)
-        return logits
+        return logits, weights
 
     def print_model_summary(self):
         total = sum(p.numel() for p in self.parameters())

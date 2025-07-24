@@ -27,7 +27,7 @@ class GradCAM:
         images_dict_grad = {k: v.clone().detach().requires_grad_(True).to(v.device) for k, v in images_dict.items()}
 
         # Forward
-        outputs = self.model(images_dict_grad)
+        outputs, _ = self.model(images_dict_grad)
         if isinstance(outputs, tuple):
             logits = outputs[1] if use_tumor_head else outputs[0]
         else:

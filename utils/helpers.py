@@ -7,6 +7,7 @@ from datetime import datetime
 import numpy as np
 import torch
 from config import OUTPUT_DIR
+import torch.nn.functional as F
 
 def seed_everything(seed=42):
     random.seed(seed)
@@ -65,3 +66,8 @@ def safe_autocast(device):
     if device.type == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.float16)
     return torch.autocast(device_type=device.type) 
+
+def kl_divergence_uniform(weights):
+    B, M = weights.shape
+    uniform = torch.full_like(weights, 1.0 / M)
+    return F.kl_div(weights.log(), uniform, reduction='batchmean')

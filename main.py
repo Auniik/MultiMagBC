@@ -297,7 +297,7 @@ def main():
                 single_mask = mask[j:j+1].to(device)
                 single_label = labels[j:j+1].to(device)
                 with torch.no_grad():
-                    outputs = model(single_images, single_mask)
+                    outputs, _ = model(single_images, single_mask)
                     logits = outputs[0] if isinstance(outputs, tuple) else outputs
                     _, predicted = logits.max(1)
                 
