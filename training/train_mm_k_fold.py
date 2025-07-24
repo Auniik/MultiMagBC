@@ -19,6 +19,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
     for batch_idx, (images_dict, mask, labels) in enumerate(tqdm(dataloader, desc='Train', leave=False)):
         images = {k: v.to(device, non_blocking=True) for k, v in images_dict.items()}
         labels = labels.to(device, non_blocking=True)
+        mask = mask.to(device, non_blocking=True)
 
         with safe_autocast(device):  # AMP for forward pass
             if use_mixup and mixup_alpha > 0:
@@ -74,6 +75,7 @@ def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
         for images_dict, mask, labels in tqdm(dataloader, desc='Eval ', leave=False):
             images = {k: v.to(device, non_blocking=True) for k, v in images_dict.items()}
             labels = labels.to(device, non_blocking=True)
+            mask = mask.to(device, non_blocking=True)
             
             # Use mixed precision for faster inference
             with safe_autocast(device):
@@ -134,6 +136,7 @@ def eval_model_with_threshold_optimization(model, dataloader, criterion, device,
         for images_dict, mask, labels in tqdm(dataloader, desc='Val ', leave=False):
             images = {k: v.to(device, non_blocking=True) for k, v in images_dict.items()}
             labels = labels.to(device, non_blocking=True)
+            mask = mask.to(device, non_blocking=True)
 
             # Mixed precision safe for GPU & CPU
             with safe_autocast(device):
