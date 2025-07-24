@@ -111,6 +111,7 @@ def mixup_data(x, y, alpha=0.2, device='cuda'):
     return mixed_x, y_a, y_b, lam
 
 def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    lam = torch.tensor(lam, device=pred.device, dtype=pred.dtype) 
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
 def calculate_class_weights(train_labels):
