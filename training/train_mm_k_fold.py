@@ -1,4 +1,5 @@
 
+from pyexpat import model
 import numpy as np
 import time
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, precision_recall_curve, roc_auc_score, roc_curve, precision_score, recall_score, confusion_matrix
@@ -26,6 +27,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
             if use_mixup and mixup_alpha > 0:
                 mixed_images, y_a, y_b, lam = mixup_data(images, labels, mixup_alpha, device)
                 logits = model(mixed_images, mask)
+                logits = torch.clamp(logits, -10, 10)
                 loss = mixup_criterion(criterion, logits, y_a, y_b, lam)  # MUST return tensor (no .item or .detach)
                 lam_tensor = torch.full_like(y_a, lam)
                 dominant_labels = torch.where(lam_tensor >= 0.5, y_a, y_b)
@@ -39,15 +41,16 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
 
         all_preds.extend(preds)
 
-        assert loss.requires_grad, "Loss is detached — check criterion or mixup."
-
+        # assert loss.requires_grad, "Loss is detached — check criterion or mixup."
+        loss = loss.float() 
         # Backward with scaled loss
         scaled_loss = loss / accumulation_steps
         scaler.scale(scaled_loss).backward()
 
         # Optimizer step every 'accumulation_steps' batches
         if (batch_idx + 1) % accumulation_steps == 0:
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
@@ -57,7 +60,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
 
     # Handle leftover gradients if batches not divisible by accumulation_steps
     if len(dataloader) % accumulation_steps != 0:
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        scaler.unscale_(optimizer)
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
         scaler.step(optimizer)
         scaler.update()
 

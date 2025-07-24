@@ -58,7 +58,7 @@ def get_device():
         return torch.device('cpu')
 
 class FocalLoss(torch.nn.Module):
-    def __init__(self, alpha=0.25, gamma=3.0, weight=None, label_smoothing=0.3):
+    def __init__(self, alpha=0.25, gamma=2.0, weight=None, label_smoothing=0.3):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -77,6 +77,7 @@ class FocalLoss(torch.nn.Module):
             bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
             probs = torch.sigmoid(inputs)
             pt = torch.where(targets == 1, probs, 1 - probs)
+            pt = torch.clamp(pt, 1e-6, 1 - 1e-6)
             alpha_t = torch.where(targets == 1, 
                                   inputs.new_full(targets.shape, self.alpha), 
                                   inputs.new_full(targets.shape, 1 - self.alpha))
