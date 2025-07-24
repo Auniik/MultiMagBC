@@ -64,11 +64,12 @@ class FocalLoss(torch.nn.Module):
         self.gamma = gamma
         self.weight = weight
         self.label_smoothing = label_smoothing
-        
+
     def forward(self, inputs, targets):
-        # Handle binary classification
+        # Cast correctly
+        inputs = inputs.float()
         if inputs.size(-1) == 1:
-            inputs = inputs.squeeze(-1).float()
+            # Binary
             targets = targets.float()
             if self.label_smoothing > 0:
                 targets = targets * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
@@ -76,18 +77,19 @@ class FocalLoss(torch.nn.Module):
             bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
             probs = torch.sigmoid(inputs)
             pt = torch.where(targets == 1, probs, 1 - probs)
-            alpha_t = torch.where(targets == 1, torch.tensor(self.alpha, device=inputs.device), torch.tensor(1 - self.alpha, device=inputs.device))
-            focal_weight = alpha_t * (1 - pt) ** self.gamma
+            alpha_t = torch.where(targets == 1, 
+                                  inputs.new_full(targets.shape, self.alpha), 
+                                  inputs.new_full(targets.shape, 1 - self.alpha))
+            focal_weight = alpha_t * (1 - pt).pow(self.gamma)
             loss = focal_weight * bce_loss
         else:
             # Multi-class
-            inputs = inputs.float()
             targets = targets.long()
             ce_loss = torch.nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none', label_smoothing=self.label_smoothing)
             pt = torch.exp(-ce_loss)
-            focal_weight = (1 - pt) ** self.gamma
+            focal_weight = (1 - pt).pow(self.gamma)
             loss = focal_weight * ce_loss
-        
+
         return loss.mean()
 
 def mixup_data(x, y, alpha=0.2, device='cuda'):
@@ -111,7 +113,7 @@ def mixup_data(x, y, alpha=0.2, device='cuda'):
     return mixed_x, y_a, y_b, lam
 
 def mixup_criterion(criterion, pred, y_a, y_b, lam):
-    lam = torch.tensor(lam, device=pred.device, dtype=pred.dtype) 
+    lam = torch.as_tensor(lam, device=pred.device, dtype=pred.dtype)
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
 def calculate_class_weights(train_labels):

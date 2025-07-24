@@ -10,6 +10,7 @@ from utils.helpers import safe_autocast
 
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=True, mixup_alpha=0.2, accumulation_steps=1):
+    torch.autograd.set_detect_anomaly(True)
     model.train()
     scaler = torch.GradScaler(enabled=(device.type == "cuda"))
     losses = []
@@ -37,6 +38,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
                 all_labels.extend(labels.cpu().numpy())
 
         all_preds.extend(preds)
+
+        assert loss.requires_grad, "Loss is detached — check criterion or mixup."
 
         # Backward with scaled loss
         scaled_loss = loss / accumulation_steps
