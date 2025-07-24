@@ -132,37 +132,39 @@ def set_dropout_train_only(model):
             module.eval()
     
 
-def eval_model_with_threshold_optimization(model, dataloader, criterion, device, mc_dropout=True):
-    """Evaluate model with mixed precision (AMP) and optimal threshold finding."""
-    if mc_dropout:
-        model.train()
-        set_dropout_train_only(model)
-        torch.set_grad_enabled(False)
-    else:
-        model.eval()
+def eval_model_with_threshold_optimization(model, dataloader, criterion, device, use_dropout=True):
+    """Evaluate model with safe dropout + NaN handling + clamped logits."""
+    model.eval()
+    torch.set_grad_enabled(False)
+    if use_dropout:
+        for m in model.modules():
+            if isinstance(m, torch.nn.Dropout):
+                m.train()
 
-    losses = []
-    all_labels, all_probs = [], []
+    losses, all_labels, all_probs = [], [], []
 
     with torch.no_grad():
         for images_dict, mask, labels in tqdm(dataloader, desc='Val ', leave=False):
             images = {k: v.to(device, non_blocking=True) for k, v in images_dict.items()}
             labels = labels.to(device, non_blocking=True)
-            mask = mask.to(device, non_blocking=True)
 
-            # Mixed precision safe for GPU & CPU
             with safe_autocast(device):
                 logits = model(images, mask)
-                loss = criterion(logits, labels)
 
-            losses.append(float(loss))
+            # Clamp + check for NaNs
+            logits = torch.clamp(logits, -20, 20)
+            if torch.isnan(logits).any():
+                print("⚠️ NaN detected in logits! Skipping batch.")
+                continue
+
+            loss = criterion(logits, labels)
+            losses.append(loss.item())
+
             probs = torch.softmax(logits, dim=1)[:, 1].float().cpu().numpy()
             all_probs.extend(probs.tolist())
             all_labels.extend(labels.cpu().numpy())
 
-    if mc_dropout:
-        torch.set_grad_enabled(True)
-
+    # Threshold optimization
     optimal_threshold = find_optimal_threshold(all_labels, all_probs)
     all_preds = (np.array(all_probs) >= optimal_threshold).astype(int)
 
