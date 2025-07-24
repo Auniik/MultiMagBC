@@ -25,14 +25,14 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
             if use_mixup and mixup_alpha > 0:
                 mixed_images, y_a, y_b, lam = mixup_data(images, labels, mixup_alpha, device)
                 logits = model(mixed_images, mask)
-                loss = mixup_criterion(criterion, logits, y_a, y_b, lam)
+                loss = mixup_criterion(criterion, logits, y_a, y_b, lam)  # must return tensor
                 lam_tensor = torch.full_like(y_a, lam)
                 dominant_labels = torch.where(lam_tensor >= 0.5, y_a, y_b)
                 preds = torch.argmax(logits, dim=1).cpu().numpy()
                 all_labels.extend(dominant_labels.cpu().numpy())
             else:
                 logits = model(images, mask)
-                loss = criterion(logits, labels)
+                loss = criterion(logits, labels)  # keep as tensor
                 preds = torch.argmax(logits, dim=1).cpu().numpy()
                 all_labels.extend(labels.cpu().numpy())
 
@@ -48,7 +48,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
             scaler.update()
             optimizer.zero_grad()
 
-        losses.append(float(loss))
+        # Only convert to float AFTER backward
+        losses.append(loss.item())
 
     # Handle leftover gradients if dataloader length not divisible by accumulation_steps
     if len(dataloader) % accumulation_steps != 0:
