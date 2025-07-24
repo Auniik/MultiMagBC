@@ -147,6 +147,7 @@ def eval_model_with_threshold_optimization(model, dataloader, criterion, device,
         for images_dict, mask, labels in tqdm(dataloader, desc='Val ', leave=False):
             images = {k: v.to(device, non_blocking=True) for k, v in images_dict.items()}
             labels = labels.to(device, non_blocking=True)
+            mask = mask.to(device, non_blocking=True)
 
             with safe_autocast(device):
                 logits = model(images, mask)
