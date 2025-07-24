@@ -119,12 +119,20 @@ def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
         'thresholds': thresholds.tolist(),
         'avg_inference_time': avg_inference_time
     }
+
+def set_dropout_train_only(model):
+    for module in model.modules():
+        if isinstance(module, nn.Dropout):
+            module.train()
+        elif isinstance(module, nn.BatchNorm1d) or isinstance(module, nn.BatchNorm2d):
+            module.eval()
     
 
 def eval_model_with_threshold_optimization(model, dataloader, criterion, device, mc_dropout=True):
     """Evaluate model with mixed precision (AMP) and optimal threshold finding."""
     if mc_dropout:
         model.train()
+        set_dropout_train_only(model)
         torch.set_grad_enabled(False)
     else:
         model.eval()
