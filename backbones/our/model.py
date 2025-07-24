@@ -76,27 +76,30 @@ class HierarchicalMagnificationAttention(nn.Module):
         super().__init__()
         self.mag_hierarchy = ['40', '100', '200', '400']
         self.embeddings = nn.Parameter(torch.randn(len(self.mag_hierarchy), feat_dim))
-        self.attn_layers = nn.ModuleDict({
-            mag: nn.MultiheadAttention(feat_dim, num_heads, batch_first=True)
-            for mag in self.mag_hierarchy[1:]
-        })
-        self.norms = nn.ModuleDict({
-            mag: nn.LayerNorm(feat_dim)
-            for mag in self.mag_hierarchy[1:]
-        })
+        
+        # Shared cross-mag attention (bi-directional)
+        self.attn = nn.MultiheadAttention(feat_dim, num_heads, batch_first=True)
+        self.norm = nn.LayerNorm(feat_dim)
+
+        # Learnable gating per magnification
+        self.gates = nn.Parameter(torch.ones(len(self.mag_hierarchy)))
 
     def forward(self, mag_feats):
-        enhanced = {}
+        # Add embeddings
+        enhanced = []
         for i, mag in enumerate(self.mag_hierarchy):
-            enhanced[mag] = mag_feats[mag] + self.embeddings[i]
-        hier_out = {'40': enhanced['40']}
-        for i, mag in enumerate(self.mag_hierarchy[1:], 1):
-            prev_feats = torch.stack([hier_out[m] for m in self.mag_hierarchy[:i]], dim=1)
-            query = enhanced[mag].unsqueeze(1)
-            attended, _ = self.attn_layers[mag](query, prev_feats, prev_feats)
-            fused = self.norms[mag](enhanced[mag] + attended.squeeze(1))
-            hier_out[mag] = fused
-        return hier_out
+            enhanced.append(mag_feats[mag] + self.embeddings[i])
+        enhanced = torch.stack(enhanced, dim=1)  # [B, M, C]
+
+        # Bi-directional attention across magnifications
+        attn_out, _ = self.attn(enhanced, enhanced, enhanced)  # [B, M, C]
+
+        # Gating between original + attended features
+        gates = torch.sigmoid(self.gates).view(1, len(self.mag_hierarchy), 1)
+        fused = self.norm(gates * attn_out + (1 - gates) * enhanced)
+
+        # Return as dict
+        return {mag: fused[:, i, :] for i, mag in enumerate(self.mag_hierarchy)}
     
 class HybridCrossMagFusion(nn.Module):
     def __init__(self, channels_list, output_channels=256, num_heads=8, dropout=0.3):
@@ -196,7 +199,6 @@ class MMNet(nn.Module):
         })
 
         self.hierarchical_attn = HierarchicalMagnificationAttention(self.feat_channels)
-        # self.cross_mag_fusion = ClinicalCrossMagFusion(self.feat_channels, len(magnifications))
         self.cross_mag_fusion = HybridCrossMagFusion(
             channels_list=[self.feat_channels] * len(magnifications),
             output_channels=self.feat_channels,
