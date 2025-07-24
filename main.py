@@ -220,9 +220,9 @@ def main():
 
         hierarchical_attn_results = model.aggregate_attention(test_loader, device)
         print(f"📊 Hierarchical Attention Results: {hierarchical_attn_results}")
-        heatmap_path = os.path.join(results_dir, f'fold_{fold_idx}_attention_heatmap.png')
-        save_attention_heatmap(hierarchical_attn_results, heatmap_path)
-        print(f"📊 Attention heatmap saved to: {heatmap_path}")
+        # heatmap_path = os.path.join(results_dir, f'fold_{fold_idx}_attention_heatmap.png')
+        # save_attention_heatmap(hierarchical_attn_results, heatmap_path)
+        # print(f"📊 Attention heatmap saved to: {heatmap_path}")
         
         # Print confusion matrix
         print(f"📊 Confusion Matrix (Fold {fold_idx}):")

@@ -57,63 +57,6 @@ class ClinicalChannelAttention(nn.Module):
         return x * attn.expand_as(x), attn.squeeze()
 
 
-class StochasticDepth(nn.Module):
-    def __init__(self, drop_prob=0.1):
-        super().__init__()
-        self.drop_prob = drop_prob
-
-    def forward(self, x):
-        if not self.training or self.drop_prob == 0.0:
-            return x
-        keep_prob = 1.0 - self.drop_prob
-        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-        rand = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
-        rand.floor_()
-        return x * rand / keep_prob
-
-
-class HierarchicalMagnificationAttention(nn.Module):
-    def __init__(self, feat_dim, num_heads=8):
-        super().__init__()
-        self.mag_hierarchy = ['40', '100', '200', '400']
-        self.embeddings = nn.Parameter(torch.randn(len(self.mag_hierarchy), feat_dim))
-        self.attn_layers = nn.ModuleDict({
-            mag: nn.MultiheadAttention(feat_dim, num_heads, batch_first=True)
-            for mag in self.mag_hierarchy[1:]
-        })
-        self.norms = nn.ModuleDict({
-            mag: nn.LayerNorm(feat_dim)
-            for mag in self.mag_hierarchy[1:]
-        })
-
-        # Store last attention weights for analysis
-        self.last_attn_weights = {}
-
-    def forward(self, mag_feats):
-        enhanced = {}
-        for i, mag in enumerate(self.mag_hierarchy):
-            enhanced[mag] = mag_feats[mag] + self.embeddings[i]
-
-        hier_out = {'40': enhanced['40']}
-        self.last_attn_weights.clear()  # reset each forward
-
-        for i, mag in enumerate(self.mag_hierarchy[1:], 1):
-            prev_feats = torch.stack([hier_out[m] for m in self.mag_hierarchy[:i]], dim=1)  # [B, i, C]
-            query = enhanced[mag].unsqueeze(1)  # [B, 1, C]
-            attended, attn_weights = self.attn_layers[mag](query, prev_feats, prev_feats)  # attn_weights: [B, 1, i]
-            fused = self.norms[mag](enhanced[mag] + attended.squeeze(1))
-            hier_out[mag] = fused
-
-            # Save attention weights for inspection (mean over batch)
-            self.last_attn_weights[mag] = attn_weights.mean(dim=0).detach().cpu().numpy()
-
-        return hier_out
-
-    def get_last_attn_weights(self):
-        """Returns the last computed attention weights for analysis."""
-        return {mag: weights.tolist() for mag, weights in self.last_attn_weights.items()}
-    
-
 class BidirectionalMagnificationAttention(nn.Module):
     def __init__(self, feat_dim, num_heads=8, dropout=0.1):
         super().__init__()
@@ -176,78 +119,63 @@ class BidirectionalMagnificationAttention(nn.Module):
             "weights": attn_mean.tolist()  # List of lists
         }
     
-class HybridCrossMagFusion(nn.Module):
-    def __init__(self, channels_list, output_channels=256, num_heads=8, dropout=0.3):
+class CrossMagFusion(nn.Module):
+    def __init__(self, channels_list, output_channels=256, dropout=0.3):
         super().__init__()
         self.num_mags = len(channels_list)
 
-        # Per-sample feature-driven importance (MLP-based)
+        # Align features to a common dimension
+        self.align_blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(ch, output_channels),
+                nn.LayerNorm(output_channels),  # replaced
+                nn.ReLU(inplace=True)
+            ) for ch in channels_list
+        ])
+
+        # Magnification-level importance (gating)
         self.mag_importance_mlp = nn.Sequential(
             nn.Linear(output_channels, output_channels // 4),
             nn.ReLU(inplace=True),
-            nn.Linear(output_channels // 4, 1)
+            nn.Linear(output_channels // 4, 1)  # scalar importance per mag
         )
 
-        # Align features to common dimension
-        self.align_blocks = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(channels, output_channels),
-                nn.BatchNorm1d(output_channels),
-                nn.ReLU(inplace=True)
-            ) for channels in channels_list
-        ])
-
-        # Cross-magnification attention
-        self.cross_attention = nn.MultiheadAttention(
-            embed_dim=output_channels,
-            num_heads=num_heads,
-            dropout=0.1,
-            batch_first=True
-        )
-
-        # Fusion block
+        # Final fusion MLP
         self.fusion = nn.Sequential(
             nn.Linear(output_channels * self.num_mags, output_channels * 2),
-            nn.BatchNorm1d(output_channels * 2),
+            nn.LayerNorm(output_channels * 2),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(output_channels * 2, output_channels)
         )
 
-        # Residual weighting
-        self.res_weight = nn.Parameter(torch.tensor(0.5))
-
     def forward(self, *features_list, mask=None):
-        # Step 1: Align features
+        # Align features
         aligned_feats = []
-        for features, align in zip(features_list, self.align_blocks):
-            if features.ndim == 1:
-                features = features.unsqueeze(0)
-            aligned_feats.append(align(features))
+        for feat, align in zip(features_list, self.align_blocks):
+            if feat.ndim == 1: 
+                feat = feat.unsqueeze(0)
+            aligned_feats.append(align(feat))
         aligned_feats = torch.stack(aligned_feats, dim=1)  # [B, mags, C]
 
-        # Step 2: Compute per-sample magnification weights
-        B, M, C = aligned_feats.shape
+        # Magnification weights (softmax)
         raw_weights = self.mag_importance_mlp(aligned_feats)  # [B, mags, 1]
-        weights = F.softmax(raw_weights, dim=1)
+        temperature = 0.5
+        weights = F.softmax(raw_weights / temperature, dim=1)
 
+        # Apply mask if available
         if mask is not None:
-            mask = mask.unsqueeze(-1)  # [B, mags, 1]
+            mask = mask.unsqueeze(-1)
             weights = weights * mask
             weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
 
-        weighted_feats = aligned_feats * weights  # [B, mags, C]
+        # Weighted features
+        weighted_feats = aligned_feats * weights
 
-        # Step 3: Cross-magnification attention
-        attn_out, _ = self.cross_attention(weighted_feats, weighted_feats, weighted_feats)
-        global_feat = attn_out.mean(dim=1)  # [B, C]
-
-        # Step 4: Concatenation-based fusion
-        concat_feat = torch.cat([f for f in aligned_feats.unbind(dim=1)], dim=1)
+        # Flatten & fuse
+        concat_feat = weighted_feats.flatten(start_dim=1)  # [B, mags*C]
         fused_feat = self.fusion(concat_feat)
-
-        # Step 5: Residual combination
-        return self.res_weight * global_feat + (1 - self.res_weight) * fused_feat
+        return fused_feat
 
 
 class MMNet(nn.Module):
@@ -255,7 +183,14 @@ class MMNet(nn.Module):
         super().__init__()
         self.magnifications = magnifications
         self.extractors = nn.ModuleDict({
-            f'extractor_{mag}x': timm.create_model(backbone, pretrained=True, num_classes=0, global_pool='', drop_rate=dropout * 0.5)
+            f'extractor_{mag}x': timm.create_model(
+                backbone,
+                pretrained=True,
+                num_classes=0,
+                global_pool='',
+                drop_rate=dropout * 0.5,
+                drop_path_rate=0.2 
+            )
             for mag in magnifications
         })
 
@@ -274,17 +209,16 @@ class MMNet(nn.Module):
         })
 
         self.hierarchical_attn = BidirectionalMagnificationAttention(self.feat_channels)
-        self.cross_mag_fusion = HybridCrossMagFusion(
+        self.cross_mag_fusion = CrossMagFusion(
             channels_list=[self.feat_channels] * len(magnifications),
             output_channels=self.feat_channels,
-            num_heads=8,
             dropout=dropout
         )
         
         self.dropout = nn.Dropout(p=dropout)
         self.classifier = nn.Sequential(
             nn.Linear(self.feat_channels, 512),
-            nn.BatchNorm1d(512),
+            nn.LayerNorm(512),  # replaced
             nn.ReLU(inplace=True),
             self.dropout,
             nn.Linear(512, num_classes)
@@ -296,7 +230,6 @@ class MMNet(nn.Module):
         for mag in self.magnifications:
             x = images_dict[f'mag_{mag}']
             x = self.extractors[f'extractor_{mag}x'](x)
-            x = StochasticDepth(0.1)(x)
             x, _ = self.channel_att[f'ch_att_{mag}x'](x)
             x, _ = self.spatial_att[f'sp_att_{mag}x'](x)
             channel_outs[mag] = x
@@ -344,7 +277,6 @@ class MMNet(nn.Module):
                 channel_outs = {}
                 for mag in self.magnifications:
                     x = self.extractors[f'extractor_{mag}x'](images[f'mag_{mag}'])
-                    x = StochasticDepth(0.1)(x)
                     x, _ = self.channel_att[f'ch_att_{mag}x'](x)
                     x, _ = self.spatial_att[f'sp_att_{mag}x'](x)
                     channel_outs[mag] = x
