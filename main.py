@@ -16,6 +16,7 @@ import torch.nn as nn
 import torch.optim as optim
 from backbones.our.model import MMNet
 from backbones.our.simple_model import SimpleMMNet
+from backbones.our.enhanced_model import EnhancedMMNet
 from config import (SLIDES_PATH, LEARNING_RATE, NUM_EPOCHS, EARLY_STOPPING_PATIENCE, 
                     LR_SCHEDULER_PATIENCE, LR_SCHEDULER_FACTOR, DROPOUT_RATE, WEIGHT_DECAY,
                     SAMPLES_PER_PATIENT_BALANCED, EPOCH_MULTIPLIER_BALANCED, VAL_SAMPLES_PER_PATIENT_BALANCED,
@@ -119,16 +120,17 @@ def main():
         print(f"Class weights: Benign={class_weights[0]:.2f}, Malignant={class_weights[1]:.2f}")
         
         epochs = NUM_EPOCHS
-        # EMERGENCY: Use ultra-simple model for debugging stability
-        model = SimpleMMNet(dropout=0.3).to(device)
-        # Use standard CrossEntropy instead of FocalLoss
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-        # Use SGD instead of AdamW for maximum stability
-        optimizer = optim.SGD(
+        # Use enhanced model with stable attention and fusion
+        model = EnhancedMMNet(dropout=0.4, backbone='resnet34').to(device)
+        # Use standard CrossEntropy for now (can add FocalLoss later)
+        criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.05)
+        # Use AdamW with conservative settings
+        optimizer = optim.AdamW(
             model.parameters(), 
-            lr=1e-3,  # Higher LR for SGD
-            momentum=0.9,
-            weight_decay=1e-4
+            lr=3e-4,  # Conservative learning rate
+            weight_decay=5e-4,
+            eps=1e-6,
+            betas=(0.9, 0.95)
         )
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', factor=LR_SCHEDULER_FACTOR, 

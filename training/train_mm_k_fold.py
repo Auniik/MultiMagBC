@@ -7,6 +7,7 @@ from tqdm import tqdm
 import torch.nn as nn
 from config import mixup_data, mixup_criterion
 from utils.helpers import safe_autocast
+from utils.gradient_diagnostics import diagnose_gradients
 
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=True, mixup_alpha=0.2, accumulation_steps=1):
@@ -18,7 +19,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
     optimizer.zero_grad()
     
     # Initialize gradient clipping parameters  
-    max_grad_norm = 1.0  # Back to reasonable clipping for simple model
+    max_grad_norm = 2.0  # Slightly more lenient for enhanced model
 
     for batch_idx, (images_dict, mask, labels) in enumerate(tqdm(dataloader, desc='Train', leave=False)):
         images = {k: v.to(device, non_blocking=True) for k, v in images_dict.items()}
@@ -58,10 +59,18 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
             grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
             
             # Check for exploding gradients
-            if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 5:  # More lenient for debugging
+            if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 3:  # Reasonable threshold
                 optimizer.step()
             else:
                 print(f"⚠️ Large gradient norm detected: {grad_norm:.4f}. Skipping step.")
+                # Run diagnostics on first occurrence
+                if batch_idx == 0 and 'grad_diagnosed' not in locals():
+                    print("🔬 Running gradient diagnostics...")
+                    try:
+                        grad_stats, problem_layers = diagnose_gradients(model, loss, verbose=True)
+                        grad_diagnosed = True
+                    except Exception as e:
+                        print(f"Diagnostic failed: {e}")
                 
             optimizer.zero_grad()
 
@@ -70,8 +79,10 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
     # Handle leftover gradients
     if len(dataloader) % accumulation_steps != 0:
         grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-        if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 5:
+        if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 3:
             optimizer.step()
+        else:
+            print(f"⚠️ Large gradient norm in final step: {grad_norm:.4f}.")
 
     acc = accuracy_score(all_labels, all_preds)
     return np.mean(losses), acc
