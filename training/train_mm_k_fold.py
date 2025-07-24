@@ -60,10 +60,14 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
     return np.mean(losses), acc
 
 def find_optimal_threshold(y_true, y_probs):
+    # Replace NaNs/Infs to avoid crash
+    y_probs = np.nan_to_num(y_probs, nan=0.5, posinf=1.0, neginf=0.0)
     precision, recall, thresholds = precision_recall_curve(y_true, y_probs)
     f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
     best_idx = np.argmax(f1_scores)
-    return thresholds[best_idx] if 0.3 <= thresholds[best_idx] <= 0.7 else 0.5
+    # Clamp threshold range
+    best_thresh = thresholds[best_idx] if 0.3 <= thresholds[best_idx] <= 0.7 else 0.5
+    return best_thresh
 
 def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
     model.eval()
@@ -129,7 +133,7 @@ def set_dropout_train_only(model):
     
 
 def eval_model_with_threshold_optimization(model, dataloader, criterion, device, mc_dropout=True):
-    """Evaluate model with mixed precision (AMP) and optimal threshold finding."""
+    """Evaluate model with mixed precision (AMP) and safe threshold finding."""
     if mc_dropout:
         model.train()
         set_dropout_train_only(model)
@@ -141,24 +145,32 @@ def eval_model_with_threshold_optimization(model, dataloader, criterion, device,
     all_labels, all_probs = [], []
 
     with torch.no_grad():
-        for images_dict, mask, labels in tqdm(dataloader, desc='Val ', leave=False):
+        for batch_idx, (images_dict, mask, labels) in enumerate(tqdm(dataloader, desc='Val ', leave=False)):
             images = {k: v.to(device, non_blocking=True) for k, v in images_dict.items()}
             labels = labels.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
 
-            # Mixed precision safe for GPU & CPU
             with safe_autocast(device):
                 logits = model(images, mask)
+                # Clamp logits to avoid softmax overflow
+                logits = torch.clamp(logits, -20, 20)
                 loss = criterion(logits, labels)
 
             losses.append(float(loss))
             probs = torch.softmax(logits, dim=1)[:, 1].float().cpu().numpy()
+
+            # Replace NaNs immediately if any
+            if np.isnan(probs).any():
+                print(f"⚠️ NaN detected in batch {batch_idx} probs. Replacing with 0.5.")
+                probs = np.nan_to_num(probs, nan=0.5, posinf=1.0, neginf=0.0)
+
             all_probs.extend(probs.tolist())
             all_labels.extend(labels.cpu().numpy())
 
     if mc_dropout:
         torch.set_grad_enabled(True)
 
+    # Find optimal threshold (now safe)
     optimal_threshold = find_optimal_threshold(all_labels, all_probs)
     all_preds = (np.array(all_probs) >= optimal_threshold).astype(int)
 
