@@ -21,6 +21,7 @@ from config import (SLIDES_PATH, LEARNING_RATE, NUM_EPOCHS, EARLY_STOPPING_PATIE
                     FOCAL_ALPHA, FOCAL_GAMMA, LABEL_SMOOTHING, MIXUP_ALPHA, FocalLoss, 
                     get_training_config, calculate_class_weights, mixup_data, mixup_criterion)
 from evaluate.gradcam import GradCAM, visualize_gradcam
+from evaluate.plottings import save_attention_heatmap
 from preprocess.kfold_splitter import PatientWiseKFoldSplitter
 
 from torch.utils.data import DataLoader
@@ -196,8 +197,6 @@ def main():
                 print(f"✅ New best validation balanced accuracy: {best_val_bal_acc:.3f}, threshold: {optimal_threshold:.3f}")
                 importance = model.get_magnification_importance(val_loader, device)
                 print(f" 📊 Mag Importance: {importance}")
-                attn_maps = model.hierarchical_attn.get_last_attn_weights()
-                print(" 📊 Attention weights per magnification:", attn_maps)
             else:
                 epochs_no_improve += 1
             
@@ -218,6 +217,12 @@ def main():
         )
 
         print(f"⚡️ Test Results: Acc {metrics['accuracy']:.3f}, BalAcc {metrics['balanced_accuracy']:.3f}, F1 {metrics['f1_score']:.3f}, AUC {metrics['auc']:.3f}, Precision {metrics['precision']:.3f}, Recall {metrics['recall']:.3f} (threshold: {optimal_threshold:.3f})")
+
+        hierarchical_attn_results = model.hierarchical_attn.aggregate_attention(test_loader, device)
+        print(f"📊 Hierarchical Attention Results: {hierarchical_attn_results}")
+        heatmap_path = os.path.join(results_dir, f'fold_{fold_idx}_attention_heatmap.png')
+        save_attention_heatmap(hierarchical_attn_results, heatmap_path)
+        print(f"📊 Attention heatmap saved to: {heatmap_path}")
         
         # Print confusion matrix
         print(f"📊 Confusion Matrix (Fold {fold_idx}):")
@@ -242,7 +247,7 @@ def main():
                 'thresholds': metrics['thresholds']
             },
             'magnification_importance': importance,
-            'attention_maps': attn_maps,
+            'hierarchical_attention': hierarchical_attn_results,
             'training_history': {
                 'train_losses': train_losses,
                 'train_accuracies': train_accuracies,

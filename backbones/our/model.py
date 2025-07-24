@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -175,6 +176,38 @@ class BidirectionalMagnificationAttention(nn.Module):
             "weights": attn_mean.tolist()  # List of lists
         }
     
+    def aggregate_attention(self, dataloader, device):
+        """
+        Computes average attention matrix across all samples in a dataloader.
+        Returns: dict { 'magnifications': [...], 'weights': [[...], [...], ...] }
+        """
+        self.eval()
+        all_attns = []
+
+        with torch.no_grad():
+            for images_dict, mask, _ in dataloader:
+                images = {k: v.to(device) for k, v in images_dict.items()}
+
+                # Forward pass through just this attention block
+                feats = torch.stack([images_dict[k].to(device) for k in images_dict], dim=1)  # [B, 4, C] dummy
+                feats = feats + self.embeddings.unsqueeze(0)
+                _, attn_weights = self.attn(feats, feats, feats)  # [B, heads, 4, 4]
+                all_attns.append(attn_weights.cpu())
+
+        if len(all_attns) == 0:
+            return None
+
+        # Concatenate across batches -> average over batch & heads
+        all_attns = torch.cat(all_attns, dim=0)  # [N, heads, 4, 4]
+        mean_attn = all_attns.mean(dim=(0, 1))  # [4, 4]
+
+        all_per_sample = [attn.cpu().numpy() for attn in all_attns]  # store raw [N, heads, 4, 4]
+        return {
+            "magnifications": self.mag_hierarchy,
+            "mean_weights": mean_attn.tolist(),
+            "all_samples": np.concatenate(all_per_sample, axis=0).tolist()
+        }
+    
 class HybridCrossMagFusion(nn.Module):
     def __init__(self, channels_list, output_channels=256, num_heads=8, dropout=0.3):
         super().__init__()
@@ -321,8 +354,14 @@ class MMNet(nn.Module):
         print(f"Total params: {total:,}, Trainable: {trainable:,}")
 
     def get_magnification_importance(self, dataloader=None, device="cuda"):
+        """
+        Compute mean magnification importance across a dataset using the trained fusion MLP.
+        Falls back to uniform weights if no dataloader is provided.
+        """
         self.eval()
-        if dataloader is None:  # fallback: static equal weights
+
+        # Fallback: no dataloader → return equal weights
+        if dataloader is None:
             with torch.no_grad():
                 raw_weights = torch.ones(len(self.magnifications))
                 return {mag: float((raw_weights / raw_weights.sum())[i].cpu()) for i, mag in enumerate(self.magnifications)}
@@ -333,24 +372,33 @@ class MMNet(nn.Module):
                 images = {k: v.to(device) for k, v in images_dict.items()}
                 mask = mask.to(device)
 
-                # Extract features for each magnification
-                feats = []
-                for i, mag in enumerate(self.magnifications):
+                # Stage 1: Extract features
+                channel_outs = {}
+                for mag in self.magnifications:
                     x = self.extractors[f'extractor_{mag}x'](images[f'mag_{mag}'])
-                    x = F.adaptive_avg_pool2d(x, 1).view(x.size(0), -1)  # flatten
-                    x = self.cross_mag_fusion.align_blocks[i](x)
-                    feats.append(x)
+                    x, _ = self.channel_att[f'ch_att_{mag}x'](x)
+                    x, _ = self.spatial_att[f'sp_att_{mag}x'](x)
+                    channel_outs[mag] = x
+
+                # Stage 2: Hierarchical (bidirectional) attention
+                hier_feats = self.hierarchical_attn(channel_outs)
+                feats = [self.cross_mag_fusion.align_blocks[i](hier_feats[mag]) for i, mag in enumerate(self.magnifications)]
                 aligned_feats = torch.stack(feats, dim=1)  # [B, mags, C]
 
-                # Get dynamic importance
+                num_mags = self.cross_mag_fusion.num_mags
+                # Stage 3: Compute per-sample fusion weights
                 raw_weights = self.cross_mag_fusion.mag_importance_mlp(aligned_feats)  # [B, mags, 1]
                 weights = F.softmax(raw_weights, dim=1)
+
+                # Apply mask (normalize only over available magnifications)
                 if mask is not None:
                     mask = mask.unsqueeze(-1)
                     weights = weights * mask
-                    weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
+                    denom = weights.sum(dim=1, keepdim=True)
+                    weights = torch.where(denom > 0, weights / (denom + 1e-8), torch.full_like(weights, 1.0 / num_mags))
 
                 all_weights.append(weights.squeeze(-1).cpu())
 
+        # Average across all batches
         mean_weights = torch.cat(all_weights, dim=0).mean(dim=0)
         return {mag: float(mean_weights[i]) for i, mag in enumerate(self.magnifications)}
