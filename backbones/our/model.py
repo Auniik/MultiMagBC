@@ -112,6 +112,69 @@ class HierarchicalMagnificationAttention(nn.Module):
         """Returns the last computed attention weights for analysis."""
         return {mag: weights.tolist() for mag, weights in self.last_attn_weights.items()}
     
+
+class BidirectionalMagnificationAttention(nn.Module):
+    def __init__(self, feat_dim, num_heads=8, dropout=0.1):
+        super().__init__()
+        self.mag_hierarchy = ['40', '100', '200', '400']
+        self.embeddings = nn.Parameter(torch.randn(len(self.mag_hierarchy), feat_dim))
+        self.attn = nn.MultiheadAttention(
+            embed_dim=feat_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.norm = nn.LayerNorm(feat_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim * 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(feat_dim * 2, feat_dim)
+        )
+        self.norm2 = nn.LayerNorm(feat_dim)
+
+        # For inspection
+        self.last_attn_weights = None
+
+    def forward(self, mag_feats):
+        # Stack features into [B, 4, C] and add learnable embeddings
+        feats = torch.stack([mag_feats[mag] for mag in self.mag_hierarchy], dim=1)  # [B, 4, C]
+        feats = feats + self.embeddings.unsqueeze(0)  # add embeddings
+
+        # Self-attention (all magnifications attend to each other)
+        attn_out, attn_weights = self.attn(feats, feats, feats)  # [B, 4, C]
+        self.last_attn_weights = attn_weights.detach().cpu().numpy()  # Save for analysis
+
+        # Residual + normalization
+        feats = self.norm(feats + attn_out)
+
+        # Feed-forward network (Transformer block style)
+        ffn_out = self.ffn(feats)
+        feats = self.norm2(feats + ffn_out)
+
+        # Return as dict for downstream layers
+        return {mag: feats[:, i, :] for i, mag in enumerate(self.mag_hierarchy)}
+
+    def get_last_attn_weights(self):
+        """
+        Returns attention weights as a JSON-friendly dictionary:
+        {
+            'magnifications': ['40', '100', '200', '400'],
+            'weights': [[...], [...], [...], [...]]  # averaged attention matrix
+        }
+        """
+        if self.last_attn_weights is None:
+            return None
+
+        # Average over batch & heads -> shape [query_len, key_len]
+        attn_mean = self.last_attn_weights.mean(axis=(0, 1))  # numpy array [4, 4]
+
+        # Convert to list for JSON
+        return {
+            "magnifications": self.mag_hierarchy,
+            "weights": attn_mean.tolist()  # List of lists
+        }
+    
 class HybridCrossMagFusion(nn.Module):
     def __init__(self, channels_list, output_channels=256, num_heads=8, dropout=0.3):
         super().__init__()
@@ -209,7 +272,7 @@ class MMNet(nn.Module):
             for mag in magnifications
         })
 
-        self.hierarchical_attn = HierarchicalMagnificationAttention(self.feat_channels)
+        self.hierarchical_attn = BidirectionalMagnificationAttention(self.feat_channels)
         self.cross_mag_fusion = HybridCrossMagFusion(
             channels_list=[self.feat_channels] * len(magnifications),
             output_channels=self.feat_channels,
