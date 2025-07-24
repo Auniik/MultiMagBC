@@ -176,38 +176,6 @@ class BidirectionalMagnificationAttention(nn.Module):
             "weights": attn_mean.tolist()  # List of lists
         }
     
-    def aggregate_attention(self, dataloader, device):
-        """
-        Computes average attention matrix across all samples in a dataloader.
-        Returns: dict { 'magnifications': [...], 'weights': [[...], [...], ...] }
-        """
-        self.eval()
-        all_attns = []
-
-        with torch.no_grad():
-            for images_dict, mask, _ in dataloader:
-                images = {k: v.to(device) for k, v in images_dict.items()}
-
-                # Forward pass through just this attention block
-                feats = torch.stack([images_dict[k].to(device) for k in images_dict], dim=1)  # [B, 4, C] dummy
-                feats = feats + self.embeddings.unsqueeze(0)
-                _, attn_weights = self.attn(feats, feats, feats)  # [B, heads, 4, 4]
-                all_attns.append(attn_weights.cpu())
-
-        if len(all_attns) == 0:
-            return None
-
-        # Concatenate across batches -> average over batch & heads
-        all_attns = torch.cat(all_attns, dim=0)  # [N, heads, 4, 4]
-        mean_attn = all_attns.mean(dim=(0, 1))  # [4, 4]
-
-        all_per_sample = [attn.cpu().numpy() for attn in all_attns]  # store raw [N, heads, 4, 4]
-        return {
-            "magnifications": self.mag_hierarchy,
-            "mean_weights": mean_attn.tolist(),
-            "all_samples": np.concatenate(all_per_sample, axis=0).tolist()
-        }
-    
 class HybridCrossMagFusion(nn.Module):
     def __init__(self, channels_list, output_channels=256, num_heads=8, dropout=0.3):
         super().__init__()
@@ -376,6 +344,7 @@ class MMNet(nn.Module):
                 channel_outs = {}
                 for mag in self.magnifications:
                     x = self.extractors[f'extractor_{mag}x'](images[f'mag_{mag}'])
+                    x = StochasticDepth(0.1)(x)
                     x, _ = self.channel_att[f'ch_att_{mag}x'](x)
                     x, _ = self.spatial_att[f'sp_att_{mag}x'](x)
                     channel_outs[mag] = x
@@ -402,3 +371,40 @@ class MMNet(nn.Module):
         # Average across all batches
         mean_weights = torch.cat(all_weights, dim=0).mean(dim=0)
         return {mag: float(mean_weights[i]) for i, mag in enumerate(self.magnifications)}
+    
+    def aggregate_attention(self, dataloader, device):
+        """
+        Computes average hierarchical attention across all samples.
+        Returns: dict with magnifications and mean attention weights.
+        """
+        self.eval()
+        all_attns = []
+
+        with torch.no_grad():
+            for images_dict, mask, _ in dataloader:
+                # Step 1: Extract features
+                channel_outs = {}
+                for mag in self.magnifications:
+                    x = self.extractors[f'extractor_{mag}x'](images_dict[f'mag_{mag}'].to(device))
+                    x, _ = self.channel_att[f'ch_att_{mag}x'](x)
+                    x, _ = self.spatial_att[f'sp_att_{mag}x'](x)
+                    channel_outs[mag] = x
+
+                # Step 2: Prepare stacked features for attention
+                feats = torch.stack([channel_outs[mag] for mag in self.magnifications], dim=1)
+                feats = feats + self.hierarchical_attn.embeddings.unsqueeze(0)
+
+                # Step 3: Run multi-head attention directly
+                _, attn_weights = self.hierarchical_attn.attn(feats, feats, feats)  # [B, heads, 4, 4]
+                all_attns.append(attn_weights.cpu())
+
+        if not all_attns:
+            return None
+
+        all_attns = torch.cat(all_attns, dim=0)  # [N, heads, 4, 4]
+        mean_attn = all_attns.mean(dim=(0, 1))  # [4, 4]
+
+        return {
+            "magnifications": self.magnifications,
+            "mean_weights": mean_attn.tolist()
+        }

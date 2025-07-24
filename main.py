@@ -218,7 +218,7 @@ def main():
 
         print(f"⚡️ Test Results: Acc {metrics['accuracy']:.3f}, BalAcc {metrics['balanced_accuracy']:.3f}, F1 {metrics['f1_score']:.3f}, AUC {metrics['auc']:.3f}, Precision {metrics['precision']:.3f}, Recall {metrics['recall']:.3f} (threshold: {optimal_threshold:.3f})")
 
-        hierarchical_attn_results = model.hierarchical_attn.aggregate_attention(test_loader, device)
+        hierarchical_attn_results = model.aggregate_attention(test_loader, device)
         print(f"📊 Hierarchical Attention Results: {hierarchical_attn_results}")
         heatmap_path = os.path.join(results_dir, f'fold_{fold_idx}_attention_heatmap.png')
         save_attention_heatmap(hierarchical_attn_results, heatmap_path)
