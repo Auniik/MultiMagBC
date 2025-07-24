@@ -14,32 +14,32 @@ MAGNIFICATIONS = ['40X', '100X', '200X', '400X']
 
 # Training settings
 NUM_EPOCHS = 25
-LEARNING_RATE = 1e-4  # Increased from 5e-5 to accelerate learning
+LEARNING_RATE = 5e-5  # Reduced for stability
 RANDOM_SEED = 42
-EARLY_STOPPING_PATIENCE = 5  # Reduced to prevent overfitting
-LR_SCHEDULER_PATIENCE = 3
-LR_SCHEDULER_FACTOR = 0.5
+EARLY_STOPPING_PATIENCE = 7  # Increased back for stability
+LR_SCHEDULER_PATIENCE = 5  # Increased patience
+LR_SCHEDULER_FACTOR = 0.7  # Less aggressive LR reduction
 
 # Gradient accumulation for effective larger batch sizes
 GRADIENT_ACCUMULATION_STEPS = 2  # Effective batch size = 16 * 2 = 32
 
-# Enhanced regularization settings for balanced utilization
-DROPOUT_RATE = 0.8   # Increased to prevent overfitting
-WEIGHT_DECAY = 5e-3  # Increased weight decay for better generalization
-LABEL_SMOOTHING = 0.15  # Increased label smoothing to prevent overconfidence
+# Emergency stability settings
+DROPOUT_RATE = 0.5   # Reduced dropout - too much was causing instability
+WEIGHT_DECAY = 1e-4  # Much lower weight decay for stability
+LABEL_SMOOTHING = 0.05  # Reduced label smoothing for stability
 
 # Gradient clipping for numerical stability
-GRAD_CLIP_NORM = 1.0
+GRAD_CLIP_NORM = 0.5  # Much more aggressive clipping
 
 # Layer normalization epsilon for numerical stability
-LAYER_NORM_EPS = 1e-6
+LAYER_NORM_EPS = 1e-5
 
 # Mixup augmentation settings
-MIXUP_ALPHA = 0.2  # Reverted from 0.4 - moderate augmentation
+MIXUP_ALPHA = 0.1  # Reduced for stability
 
-# Focal loss settings for balanced utilization  
-FOCAL_ALPHA = 0.25  # Adjusted for better class balance
-FOCAL_GAMMA = 2.0   # Reduced gamma for more stable training
+# Focal loss settings for stability
+FOCAL_ALPHA = 0.75  # Back to standard setting
+FOCAL_GAMMA = 1.0   # Much lower gamma for stability
 
 # Model settings
 BACKBONE = 'efficientnet_b0'

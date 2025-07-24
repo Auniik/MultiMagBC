@@ -16,8 +16,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
     all_preds, all_labels = [], []
     optimizer.zero_grad()
     
-    # Initialize gradient clipping parameters
-    max_grad_norm = 1.0
+    # Initialize gradient clipping parameters  
+    max_grad_norm = 0.5  # Much more aggressive clipping
     scaler_updated = False  # Track scaler state
 
     for batch_idx, (images_dict, mask, labels) in enumerate(tqdm(dataloader, desc='Train', leave=False)):
@@ -65,8 +65,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
                 # Apply gradient clipping
                 grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                 
-                # Check for exploding gradients
-                if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 10:
+                # Check for exploding gradients - much more aggressive
+                if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 2:  # Only 2x threshold now
                     scaler.step(optimizer)
                     scaler.update()
                 else:
@@ -93,7 +93,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
         try:
             scaler.unscale_(optimizer)
             grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-            if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 10:
+            if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 2:  # Same aggressive threshold
                 scaler.step(optimizer)
             scaler.update()
         except RuntimeError as e:

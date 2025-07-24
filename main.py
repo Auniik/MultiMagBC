@@ -120,13 +120,13 @@ def main():
         epochs = NUM_EPOCHS
         model = MMNet(dropout=DROPOUT_RATE).to(device)
         criterion = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, weight=class_weights, label_smoothing=LABEL_SMOOTHING)
-        # Use AdamW with improved parameters for stability
+        # Use AdamW with emergency stability parameters
         optimizer = optim.AdamW(
             model.parameters(), 
             lr=LEARNING_RATE, 
             weight_decay=WEIGHT_DECAY,
-            eps=1e-8,  # Increased epsilon for numerical stability
-            betas=(0.9, 0.999),  # Standard beta values
+            eps=1e-6,  # Much higher epsilon for stability
+            betas=(0.9, 0.99),  # Slightly different betas
             amsgrad=False  # Keep False for stability
         )
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(

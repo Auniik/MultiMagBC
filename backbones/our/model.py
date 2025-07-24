@@ -230,21 +230,22 @@ class MMNet(nn.Module):
                 nn.init.constant_(m.weight, 1.0)
     
     def forward(self, images_dict, mask=None):
-        # Extract features per magnification with numerical stability
+        # Extract features per magnification with emergency stability
         channel_outs = {}
         for mag in self.magnifications:
             x = images_dict[f'mag_{mag}']
-            # Add small noise for regularization during training
-            if self.training:
-                x = x + torch.randn_like(x) * 0.01
+            # Remove noise injection - was causing instability
             x = self.extractors[f'extractor_{mag}x'](x)
-            # Check for NaN in features
-            if torch.isnan(x).any():
-                print(f"⚠️ NaN detected in {mag}x features. Replacing with zeros.")
+            # Aggressive NaN checking and replacement
+            if torch.isnan(x).any() or torch.isinf(x).any():
+                print(f"⚠️ NaN/Inf detected in {mag}x features. Replacing.")
                 x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
-            x = StochasticDepth(0.1)(x)
+            # Disable stochastic depth for now - causing instability  
+            # x = StochasticDepth(0.1)(x)
             x, _ = self.channel_att[f'ch_att_{mag}x'](x)
             x, _ = self.spatial_att[f'sp_att_{mag}x'](x)
+            # Final stability check
+            x = torch.clamp(x, -10, 10)
             channel_outs[mag] = x
 
         # Hierarchical magnification attention
@@ -253,18 +254,25 @@ class MMNet(nn.Module):
         # Convert dict → ordered list for fusion
         features_list = [hier_feats[mag] for mag in self.magnifications]
 
-        # Cross-magnification fusion (now fully integrated)
+        # Cross-magnification fusion with stability checks
         fused = self.cross_mag_fusion(*features_list, mask=mask)
+        # Check for NaN in fusion output
+        if torch.isnan(fused).any() or torch.isinf(fused).any():
+            print("⚠️ NaN/Inf in fusion output. Emergency fix.")
+            fused = torch.nan_to_num(fused, nan=0.0, posinf=1.0, neginf=-1.0)
+        fused = torch.clamp(fused, -5, 5)  # Aggressive clamping
         fused = self.dropout(fused)
 
-        # Classification head with stability check
+        # Classification head with aggressive stability
         logits = self.classifier(fused)
         
-        # Check for NaN in final logits
+        # Aggressive stability checks
         if torch.isnan(logits).any() or torch.isinf(logits).any():
-            print("⚠️ NaN/Inf detected in final logits. Applying emergency fix.")
-            logits = torch.nan_to_num(logits, nan=0.0, posinf=10.0, neginf=-10.0)
-            
+            print("⚠️ NaN/Inf detected in final logits. Emergency fix.")
+            logits = torch.nan_to_num(logits, nan=0.0, posinf=3.0, neginf=-3.0)
+        
+        # Final aggressive clamping
+        logits = torch.clamp(logits, -5, 5)
         return logits
 
     def print_model_summary(self):
