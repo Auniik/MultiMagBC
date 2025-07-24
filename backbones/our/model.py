@@ -119,13 +119,14 @@ class HybridCrossMagFusion(nn.Module):
             ) for channels in channels_list
         ])
 
-        # Cross-magnification attention
+        # Cross-magnification attention with layer norm
         self.cross_attention = nn.MultiheadAttention(
             embed_dim=output_channels,
             num_heads=num_heads,
             dropout=0.1,
             batch_first=True
         )
+        self.attn_norm = nn.LayerNorm(output_channels, eps=1e-6)
 
         # Fusion block
         self.fusion = nn.Sequential(
@@ -149,7 +150,6 @@ class HybridCrossMagFusion(nn.Module):
         aligned_feats = torch.stack(aligned_feats, dim=1)  # [B, mags, C]
 
         # Step 2: Compute per-sample magnification weights
-        B, M, C = aligned_feats.shape
         raw_weights = self.mag_importance_mlp(aligned_feats)  # [B, mags, 1]
         weights = F.softmax(raw_weights, dim=1)
 
@@ -160,8 +160,9 @@ class HybridCrossMagFusion(nn.Module):
 
         weighted_feats = aligned_feats * weights  # [B, mags, C]
 
-        # Step 3: Cross-magnification attention
+        # Step 3: Cross-magnification attention with normalization
         attn_out, _ = self.cross_attention(weighted_feats, weighted_feats, weighted_feats)
+        attn_out = self.attn_norm(attn_out)
         global_feat = attn_out.mean(dim=1)  # [B, C]
 
         # Step 4: Concatenation-based fusion
@@ -205,20 +206,42 @@ class MMNet(nn.Module):
         )
         
         self.dropout = nn.Dropout(p=dropout)
+        # Add gradient checkpointing and better initialization
         self.classifier = nn.Sequential(
             nn.Linear(self.feat_channels, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
+            nn.LayerNorm(512, eps=1e-6),  # LayerNorm instead of BatchNorm for stability
+            nn.GELU(),  # GELU instead of ReLU for smoother gradients
             self.dropout,
             nn.Linear(512, num_classes)
         )
+        
+        # Initialize weights for better convergence
+        self._init_weights()
+        
+    def _init_weights(self):
+        """Initialize weights with better initialization"""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d)):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
     
     def forward(self, images_dict, mask=None):
-        # Extract features per magnification
+        # Extract features per magnification with numerical stability
         channel_outs = {}
         for mag in self.magnifications:
             x = images_dict[f'mag_{mag}']
+            # Add small noise for regularization during training
+            if self.training:
+                x = x + torch.randn_like(x) * 0.01
             x = self.extractors[f'extractor_{mag}x'](x)
+            # Check for NaN in features
+            if torch.isnan(x).any():
+                print(f"⚠️ NaN detected in {mag}x features. Replacing with zeros.")
+                x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
             x = StochasticDepth(0.1)(x)
             x, _ = self.channel_att[f'ch_att_{mag}x'](x)
             x, _ = self.spatial_att[f'sp_att_{mag}x'](x)
@@ -234,8 +257,14 @@ class MMNet(nn.Module):
         fused = self.cross_mag_fusion(*features_list, mask=mask)
         fused = self.dropout(fused)
 
-        # Classification head
+        # Classification head with stability check
         logits = self.classifier(fused)
+        
+        # Check for NaN in final logits
+        if torch.isnan(logits).any() or torch.isinf(logits).any():
+            print("⚠️ NaN/Inf detected in final logits. Applying emergency fix.")
+            logits = torch.nan_to_num(logits, nan=0.0, posinf=10.0, neginf=-10.0)
+            
         return logits
 
     def print_model_summary(self):

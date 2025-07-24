@@ -16,7 +16,7 @@ MAGNIFICATIONS = ['40X', '100X', '200X', '400X']
 NUM_EPOCHS = 25
 LEARNING_RATE = 1e-4  # Increased from 5e-5 to accelerate learning
 RANDOM_SEED = 42
-EARLY_STOPPING_PATIENCE = 7  # Restored to original for stable training
+EARLY_STOPPING_PATIENCE = 5  # Reduced to prevent overfitting
 LR_SCHEDULER_PATIENCE = 3
 LR_SCHEDULER_FACTOR = 0.5
 
@@ -24,16 +24,22 @@ LR_SCHEDULER_FACTOR = 0.5
 GRADIENT_ACCUMULATION_STEPS = 2  # Effective batch size = 16 * 2 = 32
 
 # Enhanced regularization settings for balanced utilization
-DROPOUT_RATE = 0.75  # Increased to prevent overfitting with more data
-WEIGHT_DECAY = 3e-3  # Moderate increase for better generalization
-LABEL_SMOOTHING = 0.1  # Balanced smoothing to prevent overconfidence
+DROPOUT_RATE = 0.8   # Increased to prevent overfitting
+WEIGHT_DECAY = 5e-3  # Increased weight decay for better generalization
+LABEL_SMOOTHING = 0.15  # Increased label smoothing to prevent overconfidence
+
+# Gradient clipping for numerical stability
+GRAD_CLIP_NORM = 1.0
+
+# Layer normalization epsilon for numerical stability
+LAYER_NORM_EPS = 1e-6
 
 # Mixup augmentation settings
 MIXUP_ALPHA = 0.2  # Reverted from 0.4 - moderate augmentation
 
-# Focal loss settings for balanced utilization
-FOCAL_ALPHA = 0.5   # More balanced class weighting (vs 70.7% malignant)
-FOCAL_GAMMA = 3.0   # Increased focus on hard examples with more data
+# Focal loss settings for balanced utilization  
+FOCAL_ALPHA = 0.25  # Adjusted for better class balance
+FOCAL_GAMMA = 2.0   # Reduced gamma for more stable training
 
 # Model settings
 BACKBONE = 'efficientnet_b0'
@@ -58,13 +64,14 @@ def get_device():
         return torch.device('cpu')
 
 class FocalLoss(torch.nn.Module):
-    """Enhanced Focal Loss for addressing severe class imbalance"""
-    def __init__(self, alpha=0.25, gamma=3.0, weight=None, label_smoothing=0.3):
+    """Enhanced Focal Loss for addressing severe class imbalance with numerical stability"""
+    def __init__(self, alpha=0.25, gamma=2.0, weight=None, label_smoothing=0.15):
         super(FocalLoss, self).__init__()
         self.alpha = alpha  # Weight for positive class (benign)
-        self.gamma = gamma  # Higher gamma for better focus on hard examples
+        self.gamma = gamma  # Reduced gamma for stability
         self.weight = weight
         self.label_smoothing = label_smoothing
+        self.eps = 1e-8  # Epsilon for numerical stability
         
     def forward(self, inputs, targets):
         # Ensure inputs are properly shaped
@@ -79,13 +86,17 @@ class FocalLoss(torch.nn.Module):
             if self.label_smoothing > 0:
                 targets = targets * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
             
+            # Clamp inputs for numerical stability
+            inputs = torch.clamp(inputs, -20, 20)
+            
             # Calculate BCE with logits for numerical stability
             bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(
                 inputs, targets, reduction='none'
             )
             
-            # Calculate probabilities
+            # Calculate probabilities with stability
             probs = torch.sigmoid(inputs)
+            probs = torch.clamp(probs, self.eps, 1 - self.eps)
             pt = torch.where(targets == 1, probs, 1 - probs)
             
             # Apply alpha weighting for class imbalance
@@ -93,9 +104,13 @@ class FocalLoss(torch.nn.Module):
                                 torch.tensor(self.alpha, device=inputs.device), 
                                 torch.tensor(1 - self.alpha, device=inputs.device))
             
-            # Calculate focal loss
-            focal_weight = alpha_t * (1 - pt) ** self.gamma
+            # Calculate focal loss with stability
+            focal_weight = alpha_t * torch.pow(1 - pt + self.eps, self.gamma)
             focal_loss = focal_weight * bce_loss
+            
+            # Check for NaN/Inf and handle
+            if torch.isnan(focal_loss).any() or torch.isinf(focal_loss).any():
+                focal_loss = bce_loss  # Fallback to regular BCE
             
         else:
             # Multi-class case
@@ -108,8 +123,9 @@ class FocalLoss(torch.nn.Module):
             else:
                 ce_loss = torch.nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
             
-            # Calculate probabilities and focal weight
+            # Calculate probabilities and focal weight with stability
             pt = torch.exp(-ce_loss)
+            pt = torch.clamp(pt, self.eps, 1 - self.eps)
             
             # Apply alpha weighting
             if self.alpha is not None and len(targets) > 0:
@@ -117,11 +133,15 @@ class FocalLoss(torch.nn.Module):
                 alpha_t = torch.where(targets == 1, 
                                     torch.tensor(self.alpha, device=inputs.device), 
                                     torch.tensor(1 - self.alpha, device=inputs.device))
-                focal_weight = alpha_t * (1 - pt) ** self.gamma
+                focal_weight = alpha_t * torch.pow(1 - pt + self.eps, self.gamma)
             else:
-                focal_weight = (1 - pt) ** self.gamma
+                focal_weight = torch.pow(1 - pt + self.eps, self.gamma)
                 
             focal_loss = focal_weight * ce_loss
+            
+            # Check for NaN/Inf and handle
+            if torch.isnan(focal_loss).any() or torch.isinf(focal_loss).any():
+                focal_loss = ce_loss  # Fallback to regular CE
         
         return focal_loss.mean()
 

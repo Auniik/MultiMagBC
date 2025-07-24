@@ -15,6 +15,9 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
     losses = []
     all_preds, all_labels = [], []
     optimizer.zero_grad()
+    
+    # Initialize gradient clipping parameters
+    max_grad_norm = 1.0
 
     for batch_idx, (images_dict, mask, labels) in enumerate(tqdm(dataloader, desc='Train', leave=False)):
         images = {k: v.to(device, non_blocking=True) for k, v in images_dict.items()}
@@ -25,6 +28,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
             if use_mixup and mixup_alpha > 0:
                 mixed_images, y_a, y_b, lam = mixup_data(images, labels, mixup_alpha, device)
                 logits = model(mixed_images, mask)
+                # Clamp logits for numerical stability
+                logits = torch.clamp(logits, -20, 20)
                 loss = mixup_criterion(criterion, logits, y_a, y_b, lam)
                 lam_tensor = torch.full_like(y_a, lam)
                 dominant_labels = torch.where(lam_tensor >= 0.5, y_a, y_b)
@@ -32,9 +37,16 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
                 all_labels.extend(dominant_labels.cpu().numpy())
             else:
                 logits = model(images, mask)
+                # Clamp logits for numerical stability
+                logits = torch.clamp(logits, -20, 20)
                 loss = criterion(logits, labels)
                 preds = torch.argmax(logits, dim=1).cpu().numpy()
                 all_labels.extend(labels.cpu().numpy())
+                
+            # Check for NaN/Inf in loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"⚠️ NaN/Inf loss detected in batch {batch_idx}. Skipping batch.")
+                continue
 
         all_preds.extend(preds)
 
@@ -43,7 +55,15 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
 
         # Gradient accumulation & step
         if (batch_idx + 1) % accumulation_steps == 0:
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # Unscale gradients before clipping
+            scaler.unscale_(optimizer)
+            # Apply gradient clipping
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+            # Check for exploding gradients
+            if grad_norm > max_grad_norm * 10:
+                print(f"⚠️ Large gradient norm detected: {grad_norm:.4f}. Skipping step.")
+                optimizer.zero_grad()
+                continue
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
@@ -52,9 +72,11 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
 
     # Handle leftover gradients if dataloader length not divisible by accumulation_steps
     if len(dataloader) % accumulation_steps != 0:
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
+        scaler.unscale_(optimizer)
+        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+        if grad_norm <= max_grad_norm * 10:  # Only step if gradients are reasonable
+            scaler.step(optimizer)
+            scaler.update()
 
     acc = accuracy_score(all_labels, all_preds)
     return np.mean(losses), acc

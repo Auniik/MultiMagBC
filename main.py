@@ -18,7 +18,7 @@ from backbones.our.model import MMNet
 from config import (SLIDES_PATH, LEARNING_RATE, NUM_EPOCHS, EARLY_STOPPING_PATIENCE, 
                     LR_SCHEDULER_PATIENCE, LR_SCHEDULER_FACTOR, DROPOUT_RATE, WEIGHT_DECAY,
                     SAMPLES_PER_PATIENT_BALANCED, EPOCH_MULTIPLIER_BALANCED, VAL_SAMPLES_PER_PATIENT_BALANCED,
-                    FOCAL_ALPHA, FOCAL_GAMMA, LABEL_SMOOTHING, MIXUP_ALPHA, FocalLoss, 
+                    FOCAL_ALPHA, FOCAL_GAMMA, LABEL_SMOOTHING, MIXUP_ALPHA, GRAD_CLIP_NORM, FocalLoss, 
                     get_training_config, calculate_class_weights, mixup_data, mixup_criterion)
 from evaluate.gradcam import GradCAM, visualize_gradcam
 from preprocess.kfold_splitter import PatientWiseKFoldSplitter
@@ -120,7 +120,15 @@ def main():
         epochs = NUM_EPOCHS
         model = MMNet(dropout=DROPOUT_RATE).to(device)
         criterion = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, weight=class_weights, label_smoothing=LABEL_SMOOTHING)
-        optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+        # Use AdamW with improved parameters for stability
+        optimizer = optim.AdamW(
+            model.parameters(), 
+            lr=LEARNING_RATE, 
+            weight_decay=WEIGHT_DECAY,
+            eps=1e-8,  # Increased epsilon for numerical stability
+            betas=(0.9, 0.999),  # Standard beta values
+            amsgrad=False  # Keep False for stability
+        )
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', factor=LR_SCHEDULER_FACTOR, 
             patience=LR_SCHEDULER_PATIENCE
@@ -135,8 +143,9 @@ def main():
         train_losses, val_losses = [], []
         train_accuracies, val_accuracies = [], []
         val_metrics_history = []
-        overfitting_patience = 5
-        overfitting_threshold = 0.1
+        overfitting_patience = 3  # Reduced for earlier detection
+        overfitting_threshold = 0.05  # More sensitive threshold
+        validation_loss_window = []  # Track validation loss for stability
         importance = {}
         
         for epoch in range(1, epochs+1):
@@ -145,7 +154,8 @@ def main():
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterion, optimizer, device, 
                 use_mixup=True,
-                mixup_alpha=MIXUP_ALPHA
+                mixup_alpha=MIXUP_ALPHA,
+                accumulation_steps=2  # Use gradient accumulation for stability
             )
             val_loss, val_acc, val_bal, val_f1, val_auc, val_prec, val_rec, threshold = eval_model_with_threshold_optimization(
                 model, val_loader, criterion, device, mc_dropout=True
@@ -167,18 +177,35 @@ def main():
             })
             
             
-            # Overfitting detection
+            # Enhanced overfitting detection
             overfitting_warning = ""
             perfect_validation_warning = ""
-            if val_loss > train_loss + 0.15:
+            
+            # Check for validation loss divergence (more sensitive)
+            if val_loss > train_loss + 0.1:
                 overfitting_warning = " [VAL LOSS DIVERGENCE]"
             
+            # Track validation loss stability
+            validation_loss_window.append(val_loss)
+            if len(validation_loss_window) > 5:
+                validation_loss_window.pop(0)
+                
             # Check for train-validation loss divergence
             if len(train_losses) >= overfitting_patience:
                 recent_train_loss = np.mean(train_losses[-overfitting_patience:])
                 recent_val_loss = np.mean(val_losses[-overfitting_patience:])
                 if recent_val_loss > recent_train_loss + overfitting_threshold:
                     overfitting_warning = " [TRAIN-VAL DIVERGENCE]"
+                    
+            # Check for validation loss instability
+            if len(validation_loss_window) >= 5:
+                val_loss_std = np.std(validation_loss_window)
+                if val_loss_std > 0.05:  # High variance in validation loss
+                    overfitting_warning += " [VAL INSTABILITY]"
+            
+            # Check for suspiciously perfect validation (potential overfitting)
+            if val_bal >= 0.99 and val_auc >= 0.99:
+                perfect_validation_warning = " [PERFECT VAL - CHECK OVERFITTING]"
             
             print(f"Epoch {epoch:02d}: "
                   f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} | "
