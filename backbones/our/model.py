@@ -173,7 +173,7 @@ class HybridCrossMagFusion(nn.Module):
 
 
 class MMNet(nn.Module):
-    def __init__(self, magnifications=['40', '100', '200', '400'], num_classes=2, dropout=0.3, backbone='efficientnet_b0'):
+    def __init__(self, magnifications=['40', '100', '200', '400'], num_classes=2, dropout=0.3, backbone='resnet18'):
         super().__init__()
         self.magnifications = magnifications
         self.extractors = nn.ModuleDict({
