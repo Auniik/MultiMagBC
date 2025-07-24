@@ -4,141 +4,113 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-MMNet is a Multi-Magnification Network for breast cancer histopathology classification using the BreakHis dataset. The system processes microscopy images at four magnification levels (40x, 100x, 200x, 400x) simultaneously using advanced attention mechanisms for improved classification accuracy.
+This is a PyTorch-based deep learning project for breast cancer classification using multi-magnification histopathology images from the BreakHis dataset. The project implements MMNet (Multi-Magnification Network) with attention mechanisms to process images at different magnifications (40X, 100X, 200X, 400X) simultaneously.
 
-## Key Commands
+## Common Commands
 
 ### Setup and Environment
-- **Initial setup**: `bash setup.sh` - Sets up RunPod environment with proper CUDA/PyTorch configuration
-- **Install dependencies**: `pip install -r requirements.txt` (local) or `pip install -r requirements.runpod` (RunPod environment)
+```bash
+# Setup environment (for RunPod/cloud environments)
+bash setup.sh
+
+# Install dependencies
+pip install -r requirements.txt
+```
 
 ### Training and Evaluation
-- **Main training**: `python main.py` - Runs full 5-fold cross-validation training pipeline
-- **Single magnification training**: `python training/train_single_mag.py`
-- **Simple concatenation baseline**: `python training/train_simple_concat.py`
+```bash
+# Run full training pipeline with k-fold cross-validation
+python main.py
 
-### Testing
-- **Run tests**: `python -m pytest tests/` or `pytest tests/`
-- **Specific test**: `python -m pytest tests/test_analyze_dataset.py`
+# Run evaluation and generate visualizations
+python eval.py
 
-### Data Analysis
-- **Dataset analysis**: The analysis is automatically run when executing `main.py`, or can be run separately by importing `preprocess.analyze.analyze_dataset()`
+# Generate specific analysis
+python eval.py --learning-curves
+python eval.py --roc-curves
+python eval.py --table
+python eval.py --magnitude
+```
 
-### Result Analysis
-- **Training results**: Check RUNPOD_OUTPUT.md for detailed training logs and cross-validation results
-
-## Architecture Overview
+## Code Architecture
 
 ### Core Components
 
-1. **MMNet Model** (`backbones/our/model.py`):
-   - Multi-magnification network with hierarchical attention
-   - Processes 4 magnifications simultaneously: 40x, 100x, 200x, 400x
-   - Uses EfficientNet-B1 as backbone by default
-   - Features advanced attention mechanisms for spatial, channel, and cross-magnification fusion
+1. **Model Architecture** (`backbones/our/model.py`):
+   - `MMNet`: Main multi-magnification network with attention mechanisms
+   - `HybridCrossMagFusion`: Cross-magnification fusion with attention
+   - `MultiScaleAttentionPool`: Spatial attention pooling
 
-2. **Attention Mechanisms** (`backbones/our/attention.py`):
-   - `MultiScaleAttentionPool`: Multi-scale spatial attention
-   - `HierarchicalMagnificationAttention`: Learns relationships between magnification levels
-   - `ClinicalChannelAttention`: Enhanced channel attention with dual pooling
-   - `ClinicalCrossMagFusion`: Cross-magnification fusion with attention
+2. **Data Pipeline** (`preprocess/`):
+   - `MultiMagPatientDataset`: Handles multi-magnification patient data with sampling strategies
+   - `PatientWiseKFoldSplitter`: Patient-wise k-fold splitting to prevent data leakage
+   - `multimagset.py`: Core dataset implementation with balanced sampling
 
-3. **Data Pipeline**:
-   - `preprocess/multimagset.py`: Enhanced dataset class with adaptive multi-image sampling per patient
-     - **Adaptive Sampling Strategy**: Low-volume patients (≤15 imgs/mag) use ~60% of images, medium-volume (16-30) ~40%, high-volume (>30) ~25%
-     - **Multi-Image Support**: Samples 3 base images per patient with conservative utilization to prevent overfitting (~3-4x increase in samples per epoch)
-     - **Deterministic Sampling**: Uses epoch-based seeding for reproducible yet diverse sampling across epochs
-     - **Dynamic Batch Sizing**: Automatically adjusts batch sizes based on effective dataset size
-   - `preprocess/kfold_splitter.py`: Patient-wise K-fold splitting to prevent data leakage
-   - `preprocess/analyze.py`: Comprehensive dataset analysis and statistics
+3. **Training Pipeline** (`training/`):
+   - `train_mm_k_fold.py`: Training functions with mixup, threshold optimization
+   - `train_single_mag.py`: Single magnification baseline training
+   - `ensemble_utils.py`: Ensemble methods for multiple models
 
-4. **Training Framework**:
-   - `training/train_mm_k_fold.py`: Training and evaluation functions for multi-magnification model
-   - 5-fold cross-validation with patient-wise splitting
-   - Uses AdamW optimizer with cosine annealing learning rate schedule
+4. **Configuration** (`config.py`):
+   - Centralized configuration including hyperparameters, loss functions, data paths
+   - Custom `FocalLoss` implementation for class imbalance
+   - Training configuration based on device capabilities
+
+### Key Features
+
+- **Multi-magnification Processing**: Processes 4 different magnifications simultaneously
+- **Patient-wise Cross-validation**: Ensures no patient data leakage between folds
+- **Attention Mechanisms**: Hierarchical magnification attention and cross-magnification fusion
+- **Class Balancing**: Handles imbalanced dataset with focal loss and weighted sampling
+- **Mixed Precision Training**: Uses AMP for faster training and lower memory usage
+- **Threshold Optimization**: Automatically finds optimal classification threshold per fold
 
 ### Data Structure
 
-The dataset expects the BreakHis v1 structure:
+The project expects the BreakHis dataset structure:
 ```
-data/breakhis/BreaKHis_v1/BreaKHis_v1/histology_slides/breast/
-   benign/SOB/[tumor_type]/[patient_id]/[magnification]/
-   malignant/SOB/[tumor_type]/[patient_id]/[magnification]/
+[data/workspace]/breakhis/BreaKHis_v1/BreaKHis_v1/histology_slides/breast/
+├── benign/
+│   └── SOB/
+│       ├── adenosis/
+│       ├── fibroadenoma/
+│       ├── phyllodes_tumor/
+│       └── tubular_adenoma/
+└── malignant/
+    └── SOB/
+        ├── ductal_carcinoma/
+        ├── lobular_carcinoma/
+        ├── mucinous_carcinoma/
+        └── papillary_carcinoma/
 ```
 
-Magnifications: 40X, 100X, 200X, 400X
-Classes: Benign (0), Malignant (1)
-Tumor subtypes: 8 categories (adenosis, fibroadenoma, phyllodes_tumor, tubular_adenoma, ductal_carcinoma, lobular_carcinoma, mucinous_carcinoma, papillary_carcinoma)
-using preprocess/kfold_splitter.py file,
-got the === Fold-wise Dataset Summary ===
+Each patient folder contains subfolders for different magnifications (40X, 100X, 200X, 400X).
 
-### Configuration
+### Output Structure
 
-- **Device detection**: Automatically detects CUDA, MPS, or CPU (`config.py:get_device()`)
-- **Training config**: Adaptive batch sizes and worker counts based on device (`config.py:get_training_config()`)
-- **Hyperparameters**: Configurable in `config.py` (learning rate: 5e-5, epochs: 25, image size: 224x224)
-- **Enhanced regularization**: Dropout 0.7, weight decay 5e-3, label smoothing 0.2, mixup augmentation α=0.2
-- **Focal loss**: Alpha=0.7, gamma=2.0 for better class imbalance handling
-- **Nested cross-validation**: 30% validation split with validation dropout for proper regularization
-- **Early stopping**: Patience of 7 epochs based on validation balanced accuracy
-- **Learning rate scheduling**: ReduceLROnPlateau with patience of 3 epochs
-- **Overfitting detection**: Monitors train/validation loss gap and perfect validation performance with warnings
+Results are saved to `output/` directory:
+- `models/`: Best model checkpoints per fold
+- `results/`: JSON results per fold and CSV summaries
+- `plots/`: Training curves and analysis plots
+- `gradcam/`: GradCAM visualizations for model interpretability
 
-## Key Features
+### Important Implementation Details
 
-### Multi-Magnification Processing
-The model processes all 4 magnifications simultaneously, learning hierarchical relationships where higher magnifications can attend to lower magnifications for context.
+- **Patient-wise Splitting**: Uses patient IDs to ensure no data leakage between train/val/test
+- **Dynamic Sampling**: Training uses adaptive sampling based on available images per patient
+- **Magnification Masking**: Handles missing magnifications with zero tensors and attention masks
+- **Threshold Optimization**: Uses precision-recall curve to find optimal threshold per fold
+- **Early Stopping**: Monitors validation balanced accuracy with configurable patience
 
-### Advanced Attention Mechanisms
-- **Spatial Attention**: Focuses on important regions within each magnification
-- **Channel Attention**: Learns importance of different feature channels
-- **Hierarchical Attention**: Models magnification hierarchy (40x�100x�200x�400x)
-- **Cross-Magnification Fusion**: Combines information across all magnifications
+### Environment Variables and Paths
 
-### Patient-Wise Cross-Validation
-Ensures no data leakage by splitting patients (not images) across folds, maintaining realistic evaluation scenarios.
+The project uses `utils/env.py` to handle different environments (local vs runpod environment). The base path for data is automatically detected.
 
-### Comprehensive Evaluation
-- **Nested cross-validation**: Inner validation loop prevents threshold overfitting on test set
-- **Robust threshold optimization**: Optimized on validation set, applied to test set
-- **Enhanced data augmentation**: Rotation, elastic transforms, blur, color jitter, random erasing
-- **Focal loss with label smoothing**: Better class balance and reduced overconfidence  
-- **Overfitting monitoring**: Real-time detection of train/validation loss divergence
-- **Gradient clipping**: Prevents exploding gradients with max norm of 1.0
-- **Stronger regularization**: Higher dropout (0.5) and weight decay (1e-3) for better generalization
+### Key Hyperparameters (config.py)
 
-## File Organization
-
-- `main.py`: Main entry point for training pipeline
-- `config.py`: Configuration and device setup
-- `backbones/our/`: Custom MMNet architecture and attention modules  
-- `preprocess/`: Data preprocessing, analysis, and K-fold splitting
-- `training/`: Training loops and evaluation functions
-- `evaluate/`: Evaluation utilities (GradCAM, plotting, tables)
-- `utils/`: Helper functions and environment utilities
-- `data/`: Dataset storage (BreakHis structure expected)
-- `output/`: Training outputs (models, logs, plots)
-
-## Development Notes
-
-### Device-Specific Settings
-The system automatically adjusts batch size and num_workers based on detected device:
-- CUDA: batch_size=16, num_workers=8
-- MPS (Apple Silicon): batch_size=8, num_workers=0  
-- CPU: batch_size=4, num_workers=2
-
-### Model Checkpoints
-Best models are saved per fold as `output/fold_{i}_best.pth` based on balanced accuracy metric.
-
-### Memory Considerations
-The model processes 4 images simultaneously (one per magnification), which requires sufficient GPU memory. Batch sizes are automatically adjusted based on available hardware.
-
-## Major Improvements
-- **Enhanced Multi-Image Sampling**: Implemented conservative adaptive sampling strategy that increases data utilization from ~4% to ~15-20% per epoch, with strong regularization to prevent overfitting
-- **Advanced Multi-Magnification Attention**: Implemented hierarchical attention mechanisms to learn relationships between magnification levels
-- **Patient-Wise Cross-Validation**: Developed robust splitting strategy to prevent data leakage and ensure realistic model evaluation
-- **Overfitting Prevention**: Comprehensive detection and prevention techniques, including early stopping, gradient clipping, and advanced regularization
-- **Enhanced Data Augmentation**: Medical-specific transforms including elastic deformation, rotation, color jittering, and mixup augmentation
-- **Focal Loss Implementation**: Better handling of class imbalance with enhanced label smoothing and alpha weighting
-- **Strong Regularization Suite**: Increased dropout (0.7), weight decay (5e-3), validation dropout, and overfitting detection
-- **Dynamic Training Pipeline**: Conservative batch size adjustment and epoch-based sampling diversity with overfitting prevention
+- Image size: 224x224
+- Batch size: Automatically adjusted based on device (16 for CUDA, 8 for MPS, 4 for CPU)
+- Learning rate: 1e-4 with ReduceLROnPlateau scheduler
+- Early stopping patience: 7 epochs
+- Dropout rate: 0.75 for regularization
+- Focal loss: α=0.5, γ=3.0 for class imbalance

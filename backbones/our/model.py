@@ -97,24 +97,6 @@ class HierarchicalMagnificationAttention(nn.Module):
             fused = self.norms[mag](enhanced[mag] + attended.squeeze(1))
             hier_out[mag] = fused
         return hier_out
-
-
-# GeM pooling (for discriminative histopath features)
-class GeM(nn.Module):
-    def __init__(self, p=3.0, eps=1e-6):
-        super().__init__()
-        self.p = nn.Parameter(torch.ones(1) * p)
-        self.eps = eps
-
-    def forward(self, x):
-        x = x.clamp(min=self.eps).pow(self.p)
-        if x.ndim == 4:  # [B, C, H, W]
-            x = F.adaptive_avg_pool2d(x, 1)
-        elif x.ndim == 2:  # [B, C]
-            x = x.unsqueeze(-1).unsqueeze(-1)  # make it [B, C, 1, 1]
-        else:
-            raise ValueError(f"Unexpected tensor shape {x.shape} for GeM pooling")
-        return x.pow(1.0 / self.p)
     
 class HybridCrossMagFusion(nn.Module):
     def __init__(self, channels_list, output_channels=256, num_heads=8, dropout=0.3):
@@ -127,8 +109,6 @@ class HybridCrossMagFusion(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(output_channels // 4, 1)
         )
-        # GeM pooling
-        self.gem = GeM()
 
         # Align features to common dimension
         self.align_blocks = nn.ModuleList([
@@ -189,31 +169,6 @@ class HybridCrossMagFusion(nn.Module):
         fused_feat = self.fusion(concat_feat)
 
         # Step 5: Residual combination
-        return self.res_weight * global_feat + (1 - self.res_weight) * fused_feat
-
-class ClinicalCrossMagFusion(nn.Module):
-    def __init__(self, feat_dim, num_mags):
-        super().__init__()
-        self.mag_importance = nn.Parameter(torch.ones(num_mags))
-        self.attn = nn.MultiheadAttention(embed_dim=feat_dim, num_heads=4, batch_first=True)
-        self.fusion = nn.Sequential(
-            nn.Linear(feat_dim * num_mags, feat_dim * 2),
-            nn.BatchNorm1d(feat_dim * 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(feat_dim * 2, feat_dim)
-        )
-        self.res_weight = nn.Parameter(torch.tensor(0.5))
-
-    def forward(self, feats_dict):
-        mags = list(feats_dict.keys())
-        feats = torch.stack([feats_dict[mag] for mag in mags], dim=1)
-        weights = F.softmax(self.mag_importance, dim=0)
-        weighted = feats * weights.view(1, -1, 1)
-        attn_out, _ = self.attn(weighted, weighted, weighted)
-        global_feat = attn_out.mean(dim=1)
-        concat_feat = torch.cat([feats_dict[mag] for mag in mags], dim=1)
-        fused_feat = self.fusion(concat_feat)
         return self.res_weight * global_feat + (1 - self.res_weight) * fused_feat
 
 
