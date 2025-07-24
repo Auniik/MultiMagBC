@@ -58,71 +58,32 @@ def get_device():
         return torch.device('cpu')
 
 class FocalLoss(torch.nn.Module):
-    """Enhanced Focal Loss for addressing severe class imbalance"""
     def __init__(self, alpha=0.25, gamma=3.0, weight=None, label_smoothing=0.3):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha  # Weight for positive class (benign)
-        self.gamma = gamma  # Higher gamma for better focus on hard examples
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
         self.weight = weight
         self.label_smoothing = label_smoothing
         
     def forward(self, inputs, targets):
-        # Ensure inputs are properly shaped
         if inputs.dim() > 2:
             inputs = inputs.view(inputs.size(0), -1)
         if inputs.size(-1) == 1:
-            # Binary classification case
             inputs = inputs.squeeze(-1)
             targets = targets.float()
-            
-            # Apply label smoothing for binary case
             if self.label_smoothing > 0:
                 targets = targets * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
             
-            # Calculate BCE with logits for numerical stability
-            bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(
-                inputs, targets, reduction='none'
-            )
-            
-            # Calculate probabilities
+            bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
             probs = torch.sigmoid(inputs)
             pt = torch.where(targets == 1, probs, 1 - probs)
-            
-            # Apply alpha weighting for class imbalance
-            alpha_t = torch.where(
-                targets == 1,
-                self.alpha * torch.ones_like(targets, dtype=inputs.dtype, device=inputs.device),
-                (1 - self.alpha) * torch.ones_like(targets, dtype=inputs.dtype, device=inputs.device)
-            )
-            
-            # Calculate focal loss
+            alpha_t = torch.where(targets == 1, torch.tensor(self.alpha, device=inputs.device), torch.tensor(1 - self.alpha, device=inputs.device))
             focal_weight = alpha_t * (1 - pt) ** self.gamma
             focal_loss = focal_weight * bce_loss
-            
         else:
-            # Multi-class case
-            # Apply label smoothing
-            if self.label_smoothing > 0:
-                num_classes = inputs.size(-1)
-                targets_onehot = torch.zeros_like(inputs).scatter(1, targets.unsqueeze(1), 1)
-                targets_smooth = targets_onehot * (1 - self.label_smoothing) + self.label_smoothing / num_classes
-                ce_loss = -(targets_smooth * torch.log_softmax(inputs, dim=1)).sum(dim=1)
-            else:
-                ce_loss = torch.nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
-            
-            # Calculate probabilities and focal weight
+            ce_loss = torch.nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
             pt = torch.exp(-ce_loss)
-            
-            # Apply alpha weighting
-            if self.alpha is not None and len(targets) > 0:
-                # Create alpha tensor based on target class
-                alpha_t = torch.where(targets == 1, 
-                                    torch.tensor(self.alpha, device=inputs.device), 
-                                    torch.tensor(1 - self.alpha, device=inputs.device))
-                focal_weight = alpha_t * (1 - pt) ** self.gamma
-            else:
-                focal_weight = (1 - pt) ** self.gamma
-                
+            focal_weight = (1 - pt) ** self.gamma
             focal_loss = focal_weight * ce_loss
         
         return focal_loss.mean()
@@ -148,7 +109,7 @@ def mixup_data(x, y, alpha=0.2, device='cuda'):
     return mixed_x, y_a, y_b, lam
 
 def mixup_criterion(criterion, pred, y_a, y_b, lam):
-    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b) 
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
 def calculate_class_weights(train_labels):
     """Calculate class weights for handling imbalanced dataset"""
