@@ -17,17 +17,29 @@ import torch.optim as optim
 from backbones.our.model import MMNet
 from config import (SLIDES_PATH, LEARNING_RATE, NUM_EPOCHS, EARLY_STOPPING_PATIENCE, 
                     LR_SCHEDULER_PATIENCE, LR_SCHEDULER_FACTOR, DROPOUT_RATE, WEIGHT_DECAY,
+                    SAMPLES_PER_PATIENT_BALANCED, EPOCH_MULTIPLIER_BALANCED, VAL_SAMPLES_PER_PATIENT_BALANCED,
                     FOCAL_ALPHA, FOCAL_GAMMA, LABEL_SMOOTHING, MIXUP_ALPHA, FocalLoss, 
                     get_training_config, calculate_class_weights, mixup_data, mixup_criterion)
 from evaluate.gradcam import GradCAM, visualize_gradcam
 from preprocess.kfold_splitter import PatientWiseKFoldSplitter
-import torchvision.transforms as T
+
 from torch.utils.data import DataLoader
 
 
 from preprocess.multimagset import MultiMagPatientDataset
+from preprocess.preprocess import get_transforms
 from training.train_mm_k_fold import eval_model, eval_model_with_threshold_optimization, train_one_epoch
 from sklearn.model_selection import train_test_split
+
+from utils.stats import save_as_json
+
+def boot(config):
+    results_dir = os.path.join(config['output_dir'], 'results')
+
+    csv_path = os.path.join(results_dir, 'results_summary.csv')
+    csv_exists = os.path.exists(csv_path)
+    if csv_exists:
+        os.remove(csv_path)
 
 
 
@@ -38,16 +50,17 @@ def main():
     config = get_training_config()
     device = config['device']
     seed_everything(config['random_seed'])
-    
+
     print(f"Using device: {device}")
     print(f"Batch size: {config['batch_size']}")
     print(f"Learning rate: {config['learning_rate']}")
+
+    boot(config)
     
     print("\nDataset Analysis:")
     from preprocess.analyze import analyze_dataset
     analyze_dataset()
 
-    # Initialize splitter
     splitter = PatientWiseKFoldSplitter(
         dataset_dir=SLIDES_PATH,
         n_splits=5,
@@ -56,61 +69,48 @@ def main():
     splitter.print_summary()
     patient_dict = splitter.patient_dict
 
-    # Enhanced data augmentation for medical images
-    train_transform = T.Compose([
-        T.Resize((224, 224)),
-        T.RandomHorizontalFlip(p=0.5),
-        T.RandomVerticalFlip(p=0.5),
-        T.RandomRotation(degrees=15),  # Medical images can be rotated
-        T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.05),
-        T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))], p=0.3),
-        T.RandomApply([T.ElasticTransform(alpha=50.0, sigma=5.0)], p=0.2),  # Simulate tissue deformation
-        T.ToTensor(),
-        T.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]),
-        T.RandomErasing(p=0.1, scale=(0.02, 0.08), ratio=(0.3, 3.3), value='random')  # Occlusion
-    ])
-    eval_transform = T.Compose([
-        T.Resize((224, 224)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
-    ])
+    train_transform, eval_transform = get_transforms()
+
+    results_dir = os.path.join(config['output_dir'], 'results')
 
     fold_metrics = []
     importance_scores = []
     for fold_idx, (train_pats, test_pats) in enumerate(splitter.folds):
         print(f"\n===== Fold {fold_idx} =====")
         print(f"Train patients: {len(train_pats)}, Test patients: {len(test_pats)}")
-        # Datasets with BALANCED maximum utilization
-        from config import SAMPLES_PER_PATIENT_BALANCED, EPOCH_MULTIPLIER_BALANCED
+        
         train_ds = MultiMagPatientDataset(
             patient_dict, train_pats, transform=train_transform,
             samples_per_patient=SAMPLES_PER_PATIENT_BALANCED,  # Balanced 5 samples
             epoch_multiplier=EPOCH_MULTIPLIER_BALANCED,     # 3x diverse combinations
             adaptive_sampling=True  # Balanced utilization strategy
         )
+
         test_ds = MultiMagPatientDataset(
             patient_dict, test_pats, transform=eval_transform,
-            samples_per_patient=1,  # Keep single sample for consistent evaluation
+            samples_per_patient=1,
             adaptive_sampling=False,
             epoch_multiplier=1 
         )
         
-        # Print sampling statistics
         train_stats = train_ds.get_sampling_stats()
+
         print(f"Training samples per epoch: {train_stats['total_samples_per_epoch']} "
               f"(avg utilization: {train_stats['avg_utilization']:.1%})")
         
-        test_loader = DataLoader(test_ds, batch_size=config['batch_size'], shuffle=False, 
-                               num_workers=config['num_workers'], pin_memory=config['pin_memory'])
+        test_loader = DataLoader(
+            test_ds,
+            batch_size=config['batch_size'],
+            shuffle=False, 
+            num_workers=config['num_workers'],
+            pin_memory=config['pin_memory']
+        )
 
-        # Calculate class weights for imbalanced dataset
         train_labels = [train_ds.patient_dict[pid]['label'] for pid in train_pats]
         class_weights = calculate_class_weights(train_labels).to(device)
         print(f"Class weights: Benign={class_weights[0]:.2f}, Malignant={class_weights[1]:.2f}")
         
-        # Model, criterion, optimizer, scheduler
         epochs = NUM_EPOCHS
-
         model = MMNet(dropout=DROPOUT_RATE).to(device)
         criterion = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, weight=class_weights, label_smoothing=LABEL_SMOOTHING)
         optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
@@ -123,7 +123,6 @@ def main():
         train_pats_inner, val_pats = train_test_split(train_pats, test_size=0.3, random_state=42, stratify=[train_ds.patient_dict[pid]['label'] for pid in train_pats])
         
         # Create inner validation dataset with BALANCED sampling
-        from config import VAL_SAMPLES_PER_PATIENT_BALANCED
         val_ds = MultiMagPatientDataset(
             patient_dict, val_pats, transform=eval_transform,
             samples_per_patient=VAL_SAMPLES_PER_PATIENT_BALANCED,  # Balanced 2 samples
@@ -177,6 +176,7 @@ def main():
         val_metrics_history = []
         overfitting_patience = 5
         overfitting_threshold = 0.1
+        importance = {}
         
         for epoch in range(1, epochs+1):
             # Set epoch for deterministic sampling diversity
@@ -189,7 +189,6 @@ def main():
                 model, val_loader, criterion, device, use_dropout=True
             )
             
-            # Track metrics for learning curves
             train_losses.append(train_loss)
             train_accuracies.append(train_acc)
             val_losses.append(val_loss)
@@ -208,8 +207,6 @@ def main():
             # Overfitting detection
             overfitting_warning = ""
             perfect_validation_warning = ""
-            
-            # Check for perfect validation performance (sign of overfitting)
             if val_bal >= 0.995 or val_auc >= 0.995:
                 perfect_validation_warning = " [PERFECT VAL - POSSIBLE OVERFITTING]"
             
@@ -238,7 +235,6 @@ def main():
             else:
                 epochs_no_improve += 1
             
-            # Early stopping
             if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
                 print(f"⚠️ Early stopping after {epoch} epochs (no improvement for {EARLY_STOPPING_PATIENCE} epochs)")
                 break
@@ -251,58 +247,33 @@ def main():
             print(f"✅ Best model saved: {ckpt_path} (Val BalAcc: {best_val_bal_acc:.3f})")
         
         # Final test evaluation with optimized threshold (NO threshold optimization on test set)
-        _, test_acc, test_bal, test_f1, test_auc, test_prec, test_rec, _ = eval_model(model, test_loader, criterion, device, optimal_threshold)
+        metrics = eval_model(
+            model, test_loader, criterion, device, optimal_threshold
+        )
 
-        print(f"⚡️ Test Results: Acc {test_acc:.3f}, BalAcc {test_bal:.3f}, F1 {test_f1:.3f}, AUC {test_auc:.3f}, Precision {test_prec:.3f}, Recall {test_rec:.3f} (threshold: {optimal_threshold:.3f})")
+        print(f"⚡️ Test Results: Acc {metrics['accuracy']:.3f}, BalAcc {metrics['balanced_accuracy']:.3f}, F1 {metrics['f1_score']:.3f}, AUC {metrics['auc']:.3f}, Precision {metrics['precision']:.3f}, Recall {metrics['recall']:.3f} (threshold: {optimal_threshold:.3f})")
         
-        # Generate confusion matrix for this fold
-        from sklearn.metrics import confusion_matrix
-        test_labels = [test_ds.patient_dict[pid]['label'] for pid in test_pats]
-        test_preds = []
-        test_probs = []
-        
-        # Track inference time
-        inference_start = time.time()
-        with torch.no_grad():
-            for images_dict, labels in test_loader:
-                images = {k: v.to(device) for k, v in images_dict.items()}
-                outputs = model(images)
-                if isinstance(outputs, tuple):
-                    logits = outputs[0]
-                else:
-                    logits = outputs
-                probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
-                preds = (probs >= optimal_threshold).astype(int)
-                test_preds.extend(preds)
-                test_probs.extend(probs)
-        inference_time = time.time() - inference_start
-        avg_inference_time = inference_time / len(test_ds)
-        
-        cm = confusion_matrix(test_labels, test_preds)
+        # Print confusion matrix
         print(f"📊 Confusion Matrix (Fold {fold_idx}):")
-        print(f"   [[TN: {cm[0,0]:3d}, FP: {cm[0,1]:3d}]")
-        print(f"    [FN: {cm[1,0]:3d}, TP: {cm[1,1]:3d}]]")
-        print(f"⚡ Avg Inference Time: {avg_inference_time:.4f}s per sample")
-        
-        # Generate ROC curve data
-        fpr, tpr, thresholds = roc_curve(test_labels, test_probs)
-        
-        # Save fold results
+        print(f"   [[TN: {metrics['confusion_matrix'][0][0]:3d}, FP: {metrics['confusion_matrix'][0][1]:3d}]")
+        print(f"    [FN: {metrics['confusion_matrix'][1][0]:3d}, TP: {metrics['confusion_matrix'][1][1]:3d}]]")
+        print(f"⚡ Avg Inference Time: {metrics['avg_inference_time']:.4f}s per sample")
+
         fold_results = {
             'fold': fold_idx,
-            'test_accuracy': test_acc,
-            'test_balanced_accuracy': test_bal,
-            'test_f1': test_f1,
-            'test_auc': test_auc,
-            'test_precision': test_prec,
-            'test_recall': test_rec,
+            'test_accuracy': metrics['accuracy'],
+            'test_balanced_accuracy': metrics['balanced_accuracy'],
+            'test_f1': metrics['f1_score'],
+            'test_auc': metrics['auc'],
+            'test_precision': metrics['precision'],
+            'test_recall': metrics['recall'],
             'optimal_threshold': optimal_threshold,
-            'confusion_matrix': cm.tolist(),
-            'inference_time': avg_inference_time,
+            'confusion_matrix': metrics['confusion_matrix'],
+            'inference_time': metrics['avg_inference_time'],
             'roc_data': {
-                'fpr': fpr.tolist(),
-                'tpr': tpr.tolist(),
-                'thresholds': thresholds.tolist()
+                'fpr': metrics['fpr'],
+                'tpr': metrics['tpr'],
+                'thresholds': metrics['thresholds']
             },
             'magnification_importance': importance,
             'training_history': {
@@ -317,53 +288,41 @@ def main():
             'train_samples': len(train_ds_inner),
             'test_samples': len(test_ds)
         }
-        
-        # Save to JSON
-        results_dir = os.path.join(config['output_dir'], 'results')
-        os.makedirs(results_dir, exist_ok=True)
+
         
         json_path = os.path.join(results_dir, f'fold_{fold_idx}_results.json')
-        with open(json_path, 'w') as f:
-            json.dump(fold_results, f, indent=2)
+        save_as_json(fold_results, json_path)
         
-        # Save to CSV summary
         csv_path = os.path.join(results_dir, 'results_summary.csv')
         csv_exists = os.path.exists(csv_path)
+
         with open(csv_path, 'a', newline='') as f:
             writer = csv.writer(f)
             if not csv_exists:
                 writer.writerow(['fold', 'accuracy', 'balanced_accuracy', 'f1', 'auc', 'precision', 'recall', 'threshold', 'inference_time', 'train_patients', 'test_patients'])
-            writer.writerow([fold_idx, test_acc, test_bal, test_f1, test_auc, test_prec, test_rec, optimal_threshold, avg_inference_time, len(train_pats), len(test_pats)])
-        
+            writer.writerow([fold_idx, metrics['accuracy'], metrics['balanced_accuracy'], metrics['f1_score'], metrics['auc'], metrics['precision'], metrics['recall'], optimal_threshold, metrics['avg_inference_time'], len(train_pats), len(test_pats)])
+
         importance = model.get_magnification_importance()
         print(f"📌 Final Magnification Importance (Fold {fold_idx}): {importance}")
         print(f"💾 Results saved to: {json_path}")
-        
-        fold_metrics.append((test_acc, test_bal, test_f1, test_auc, test_prec, test_rec))
+
+        fold_metrics.append((metrics['accuracy'], metrics['balanced_accuracy'], metrics['f1_score'], metrics['auc'], metrics['precision'], metrics['recall']))
 
         # Generate GradCAM visualizations for this fold
         print(f"\n📊 Generating GradCAM visualizations for fold {fold_idx}...")
         gradcam = GradCAM(model)
         model.eval()
-        
-        # Create gradcam output directory
         gradcam_dir = os.path.join(config['output_dir'], 'gradcam')
-        os.makedirs(gradcam_dir, exist_ok=True)
         
-        # Generate for first 3 test samples
         gradcam_count = 0
         sample_idx = 0
         for images_dict, labels in test_loader:
             batch_size = labels.size(0)
-            
             for j in range(batch_size):
-                if sample_idx >= 3:
+                if sample_idx >= 5:
                     break
-                    
-                # Extract individual sample
                 single_images = {k: v[j:j+1].to(device) for k, v in images_dict.items()}
                 single_label = labels[j:j+1].to(device)
-                
                 with torch.no_grad():
                     outputs = model(single_images)
                     if isinstance(outputs, tuple):
@@ -373,19 +332,18 @@ def main():
                     _, predicted = logits.max(1)
                 
                 cams = gradcam.get_cam(single_images, target_class=predicted.item())
-                save_path = os.path.join(gradcam_dir, f'fold_{fold_idx}_sample_{sample_idx}.png')
                 visualize_gradcam(
                     cams, 
                     single_images, 
                     true_label=single_label.item(),
                     pred_label=predicted.item(),
-                    save_path=save_path,
+                    save_path=os.path.join(gradcam_dir, f'fold_{fold_idx}_sample_{sample_idx}.png'),
                     show=False
                 )
                 sample_idx += 1
                 gradcam_count += 1
-            
-            if sample_idx >= 3:
+
+            if sample_idx >= 5:
                 break
         
         print(f"✅ Generated {gradcam_count} GradCAM visualizations for fold {fold_idx}")
@@ -396,7 +354,6 @@ def main():
             'optimal_threshold': optimal_threshold
         })
     
-    # Summary with all metrics
     accs, bals, f1s, aucs, precs, recs = zip(*[(acc, bal, f1, auc, prec, rec) for acc, bal, f1, auc, prec, rec in fold_metrics])
     print("\n=== Cross-Validation Results ===")
     print(f"Acc:      {np.mean(accs):.3f} ± {np.std(accs):.3f}")
@@ -405,9 +362,19 @@ def main():
     print(f"AUC:      {np.mean(aucs):.3f} ± {np.std(aucs):.3f}")
     print(f"Precision: {np.mean(precs):.3f} ± {np.std(precs):.3f}")
     print(f"Recall:    {np.mean(recs):.3f} ± {np.std(recs):.3f}")
+    # save cross-validation results
     
-
-
+    cv_results_path = os.path.join(results_dir, 'cross_validation_results.json')
+    cv_results = {
+        'Accuracy': {'mean': np.mean(accs), 'std': np.std(accs)},
+        'Balanced Accuracy': {'mean': np.mean(bals), 'std': np.std(bals)},
+        'F1 Score': {'mean': np.mean(f1s), 'std': np.std(f1s)},
+        'AUC': {'mean': np.mean(aucs), 'std': np.std(aucs)},
+        'Precision': {'mean': np.mean(precs), 'std': np.std(precs)},
+        'Recall': {'mean': np.mean(recs), 'std': np.std(recs)}
+    }
+    with open(cv_results_path, 'w') as f:
+        json.dump(cv_results, f, indent=2)
 
 if __name__ == "__main__":
     main()

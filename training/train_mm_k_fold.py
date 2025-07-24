@@ -1,5 +1,6 @@
 
 import numpy as np
+import time
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score, roc_curve, precision_score, recall_score, confusion_matrix
 import torch
 from tqdm import tqdm
@@ -87,10 +88,10 @@ def find_optimal_threshold(y_true, y_probs):
     return max(0.3, min(0.7, best_threshold))
 
 def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
-    """Evaluate model with a given threshold (do not optimize threshold on test set)"""
     model.eval()
     losses = []
     all_preds, all_labels, all_probs = [], [], []
+    start_time = time.time()
     with torch.no_grad():
         for images_dict, labels in tqdm(dataloader, desc='Eval ', leave=False):
             images = {k: v.to(device) for k, v in images_dict.items()}
@@ -103,7 +104,9 @@ def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
             all_probs.extend(probs.tolist())
             all_labels.extend(labels.cpu().numpy())
     
-    # Use provided threshold (not optimized on this set)
+    total_time = time.time() - start_time
+    avg_inference_time = total_time / len(dataloader.dataset)
+    
     all_preds = (np.array(all_probs) >= optimal_threshold).astype(int)
     
     acc = accuracy_score(all_labels, all_preds)
@@ -113,7 +116,25 @@ def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
     precision = precision_score(all_labels, all_preds)
     recall = recall_score(all_labels, all_preds)
     
-    return np.mean(losses), acc, bal_acc, f1, auc, precision, recall, all_probs
+    cm = confusion_matrix(all_labels, all_preds)
+    fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
+    
+    return {
+        'loss': np.mean(losses),
+        'accuracy': acc,
+        'balanced_accuracy': bal_acc,
+        'f1_score': f1,
+        'auc': auc,
+        'precision': precision,
+        'recall': recall,
+        'all_probs': all_probs,
+        'confusion_matrix': cm.tolist(),
+        'fpr': fpr.tolist(),
+        'tpr': tpr.tolist(),
+        'thresholds': thresholds.tolist(),
+        'avg_inference_time': avg_inference_time
+    }
+    
 
 def eval_model_with_threshold_optimization(model, dataloader, criterion, device, use_dropout=True):
     """Evaluate model and find optimal threshold with enhanced overfitting detection"""

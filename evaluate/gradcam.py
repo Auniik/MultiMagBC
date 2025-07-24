@@ -9,7 +9,6 @@ class GradCAM:
     def __init__(self, model):
         self.model = model
         self.activations = {}
-        os.makedirs('outputs/gradcam_outputs', exist_ok=True)
 
     def get_cam(self, images_dict, target_class=None, use_tumor_head=False):
         self.model.eval()
