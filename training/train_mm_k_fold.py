@@ -18,6 +18,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
     
     # Initialize gradient clipping parameters
     max_grad_norm = 1.0
+    scaler_updated = False  # Track scaler state
 
     for batch_idx, (images_dict, mask, labels) in enumerate(tqdm(dataloader, desc='Train', leave=False)):
         images = {k: v.to(device, non_blocking=True) for k, v in images_dict.items()}
@@ -46,6 +47,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
             # Check for NaN/Inf in loss
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"⚠️ NaN/Inf loss detected in batch {batch_idx}. Skipping batch.")
+                optimizer.zero_grad()  # Clear gradients
                 continue
 
         all_preds.extend(preds)
@@ -55,28 +57,48 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
 
         # Gradient accumulation & step
         if (batch_idx + 1) % accumulation_steps == 0:
-            # Unscale gradients before clipping
-            scaler.unscale_(optimizer)
-            # Apply gradient clipping
-            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-            # Check for exploding gradients
-            if grad_norm > max_grad_norm * 10:
-                print(f"⚠️ Large gradient norm detected: {grad_norm:.4f}. Skipping step.")
-                optimizer.zero_grad()
-                continue
-            scaler.step(optimizer)
-            scaler.update()
+            # Unscale gradients before clipping (only once per accumulation step)
+            try:
+                scaler.unscale_(optimizer)
+                scaler_updated = True
+                
+                # Apply gradient clipping
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                
+                # Check for exploding gradients
+                if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 10:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    print(f"⚠️ Large gradient norm detected: {grad_norm:.4f}. Skipping step.")
+                    scaler.update()  # Still need to update scaler
+                    
+            except RuntimeError as e:
+                if "unscale_() has already been called" in str(e):
+                    # Scaler already unscaled, just proceed with step
+                    grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                    if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 10:
+                        scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    raise e
+                    
             optimizer.zero_grad()
+            scaler_updated = False
 
         losses.append(float(loss))
 
     # Handle leftover gradients if dataloader length not divisible by accumulation_steps
-    if len(dataloader) % accumulation_steps != 0:
-        scaler.unscale_(optimizer)
-        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-        if grad_norm <= max_grad_norm * 10:  # Only step if gradients are reasonable
-            scaler.step(optimizer)
+    if len(dataloader) % accumulation_steps != 0 and not scaler_updated:
+        try:
+            scaler.unscale_(optimizer)
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+            if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 10:
+                scaler.step(optimizer)
             scaler.update()
+        except RuntimeError as e:
+            if "unscale_() has already been called" not in str(e):
+                raise e
 
     acc = accuracy_score(all_labels, all_preds)
     return np.mean(losses), acc
