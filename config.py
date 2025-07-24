@@ -13,7 +13,7 @@ IMAGE_SIZE = 224
 MAGNIFICATIONS = ['40X', '100X', '200X', '400X']
 
 # Training settings
-NUM_EPOCHS = 2
+NUM_EPOCHS = 25
 LEARNING_RATE = 1e-4  # Increased from 5e-5 to accelerate learning
 RANDOM_SEED = 42
 EARLY_STOPPING_PATIENCE = 7  # Restored to original for stable training
