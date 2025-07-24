@@ -121,9 +121,12 @@ class HybridCrossMagFusion(nn.Module):
         super().__init__()
         self.num_mags = len(channels_list)
 
-        # Learnable magnification importance
-        self.mag_importance = nn.Parameter(torch.ones(self.num_mags))
-
+        # Per-sample feature-driven importance (MLP-based)
+        self.mag_importance_mlp = nn.Sequential(
+            nn.Linear(output_channels, output_channels // 4),
+            nn.ReLU(inplace=True),
+            nn.Linear(output_channels // 4, 1)
+        )
         # GeM pooling
         self.gem = GeM()
 
@@ -157,19 +160,21 @@ class HybridCrossMagFusion(nn.Module):
         self.res_weight = nn.Parameter(torch.tensor(0.5))
 
     def forward(self, *features_list, mask=None):
-        # Step 1: Align (no pooling needed, inputs are [B, C])
+        # Step 1: Align features
         aligned_feats = []
         for features, align in zip(features_list, self.align_blocks):
-            if features.ndim == 1:  # Add batch dim if missing
+            if features.ndim == 1:
                 features = features.unsqueeze(0)
             aligned_feats.append(align(features))
         aligned_feats = torch.stack(aligned_feats, dim=1)  # [B, mags, C]
 
-        # Step 2: Magnification importance weighting
-        weights = F.softmax(self.mag_importance, dim=0)  # [num_mags]
-        weights = weights.view(1, self.num_mags, 1)      # [1, mags, 1]
+        # Step 2: Compute per-sample magnification weights
+        B, M, C = aligned_feats.shape
+        raw_weights = self.mag_importance_mlp(aligned_feats)  # [B, mags, 1]
+        weights = F.softmax(raw_weights, dim=1)
+
         if mask is not None:
-            mask = mask.unsqueeze(-1)                    # [B, mags, 1]
+            mask = mask.unsqueeze(-1)  # [B, mags, 1]
             weights = weights * mask
             weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
 
@@ -284,7 +289,37 @@ class MMNet(nn.Module):
         print(f"MMNet (feat_dim={self.feat_channels})")
         print(f"Total params: {total:,}, Trainable: {trainable:,}")
 
-    def get_magnification_importance(self):
+    def get_magnification_importance(self, dataloader=None, device="cuda"):
+        self.eval()
+        if dataloader is None:  # fallback: static equal weights
+            with torch.no_grad():
+                raw_weights = torch.ones(len(self.magnifications))
+                return {mag: float((raw_weights / raw_weights.sum())[i].cpu()) for i, mag in enumerate(self.magnifications)}
+
+        all_weights = []
         with torch.no_grad():
-            weights = F.softmax(self.cross_mag_fusion.mag_importance, dim=0)
-        return {mag: float(weights[i].cpu()) for i, mag in enumerate(self.magnifications)}
+            for images_dict, mask, _ in dataloader:
+                images = {k: v.to(device) for k, v in images_dict.items()}
+                mask = mask.to(device)
+
+                # Extract features for each magnification
+                feats = []
+                for i, mag in enumerate(self.magnifications):
+                    x = self.extractors[f'extractor_{mag}x'](images[f'mag_{mag}'])
+                    x = F.adaptive_avg_pool2d(x, 1).view(x.size(0), -1)  # flatten
+                    x = self.cross_mag_fusion.align_blocks[i](x)
+                    feats.append(x)
+                aligned_feats = torch.stack(feats, dim=1)  # [B, mags, C]
+
+                # Get dynamic importance
+                raw_weights = self.cross_mag_fusion.mag_importance_mlp(aligned_feats)  # [B, mags, 1]
+                weights = F.softmax(raw_weights, dim=1)
+                if mask is not None:
+                    mask = mask.unsqueeze(-1)
+                    weights = weights * mask
+                    weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
+
+                all_weights.append(weights.squeeze(-1).cpu())
+
+        mean_weights = torch.cat(all_weights, dim=0).mean(dim=0)
+        return {mag: float(mean_weights[i]) for i, mag in enumerate(self.magnifications)}

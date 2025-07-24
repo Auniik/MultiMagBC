@@ -193,7 +193,7 @@ def main():
                 optimal_threshold = threshold
                 epochs_no_improve = 0
                 print(f"✅ New best validation balanced accuracy: {best_val_bal_acc:.3f}, threshold: {optimal_threshold:.3f}")
-                importance = model.get_magnification_importance()
+                importance = model.get_magnification_importance(val_loader, device)
                 print(f"📊 Mag Importance (Val BalAcc: {val_bal:.3f}): {importance}")
             else:
                 epochs_no_improve += 1
@@ -265,7 +265,7 @@ def main():
                 writer.writerow(['fold', 'accuracy', 'balanced_accuracy', 'f1', 'auc', 'precision', 'recall', 'threshold', 'inference_time', 'train_patients', 'test_patients'])
             writer.writerow([fold_idx, metrics['accuracy'], metrics['balanced_accuracy'], metrics['f1_score'], metrics['auc'], metrics['precision'], metrics['recall'], optimal_threshold, metrics['avg_inference_time'], len(train_pats), len(test_pats)])
 
-        importance = model.get_magnification_importance()
+        importance = model.get_magnification_importance(test_loader, device)
         print(f"📌 Final Magnification Importance (Fold {fold_idx}): {importance}")
         print(f"💾 Results saved to: {json_path}")
 
