@@ -2,6 +2,7 @@ output/**/*.pth
 output/**/*.csv
 output/**/*.png
 output/**/*.jpg
+output/**/*.json
 data/
 .DS_Store
 .venv/

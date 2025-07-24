@@ -58,3 +58,10 @@ def save_metrics(metrics, filename=None, experiment_dir=None):
         json.dump(metrics_with_info, f, indent=2, default=str)
     
     return filepath
+
+
+
+def safe_autocast(device):
+    if device.type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    return torch.autocast(device_type=device.type) 

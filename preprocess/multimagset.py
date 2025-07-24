@@ -6,107 +6,99 @@ from PIL import Image
 from collections import defaultdict
 import numpy as np
 
-
 class MultiMagPatientDataset(Dataset):
     def __init__(self, patient_dict, patient_ids, mags=['40', '100', '200', '400'], 
-                 transform=None, samples_per_patient=1, epoch_multiplier=3, 
-                 adaptive_sampling=True, class_balanced_sampling=True):
+                 transform=None, mode='train', samples_per_patient=None, epoch_multiplier=None,
+                 class_balanced_sampling=True, full_utilization_mode='all'):
         """
-        Enhanced dataset with multi-image sampling per patient
-        
+        Multi-magnification patient dataset with automatic mode handling.
+
         Args:
-            patient_dict: Dictionary containing patient data
-            patient_ids: List of patient IDs to include
-            mags: List of magnifications to use
-            transform: Image transformations to apply
-            samples_per_patient: Base number of image sets to sample per patient
-            epoch_multiplier: Multiplier for creating different combinations across epochs
-            adaptive_sampling: Use smart sampling based on available images per patient
+            patient_dict: dict of patient data
+            patient_ids: list of patient IDs
+            mags: magnifications to include
+            mode: 'train', 'val', 'test'
+            samples_per_patient: base samples per patient (for training)
+            epoch_multiplier: number of epochs with sampling diversity
+            class_balanced_sampling: use class-balanced sampling for training
+            full_utilization_mode: 'min' (strict complete sets), 'max', 'all' (avg per mag)
         """
         self.patient_dict = patient_dict
         self.patient_ids = patient_ids
         self.mags = mags
         self.transform = transform
-        self.samples_per_patient = samples_per_patient
-        self.epoch_multiplier = epoch_multiplier
-        self.adaptive_sampling = adaptive_sampling
+        self.mode = mode
         self.class_balanced_sampling = class_balanced_sampling
+        self.full_utilization_mode = full_utilization_mode
         self.epoch_seed = 0
-        
-        # Pre-compute image distribution per patient for adaptive sampling
+
+        # Compute patient image stats
         self.patient_image_counts = self._compute_patient_stats()
+
+        # Dynamic sampling configuration
+        if self.mode == 'train':
+            self.samples_per_patient = samples_per_patient or 5
+            self.epoch_multiplier = epoch_multiplier or 3
+            self.adaptive_sampling = True
+        else:  # val/test: full utilization
+            self.samples_per_patient = None
+            self.epoch_multiplier = 1
+            self.adaptive_sampling = False
+
+        # Compute final samples
         self.effective_samples = self._compute_effective_samples()
-        
-        # Setup class-balanced sampling
-        if self.class_balanced_sampling:
+
+        # Setup class balancing
+        if self.class_balanced_sampling and self.mode == 'train':
             self._setup_class_balanced_sampling()
-        
+
     def _compute_patient_stats(self):
-        """Compute image count statistics per patient per magnification"""
         stats = {}
         for pid in self.patient_ids:
             entry = self.patient_dict[pid]
-            mag_counts = defaultdict(int)
-            
-            for fpath in entry['images']:
-                mag = os.path.basename(os.path.dirname(fpath)).replace('X', '')
-                if mag in self.mags:
-                    mag_counts[mag] += 1
-            
-            # Calculate min images across mags for this patient
-            min_images = min([mag_counts.get(mag, 0) for mag in self.mags])
-            avg_images = sum([mag_counts.get(mag, 0) for mag in self.mags]) / len(self.mags)
-            
+            mag_counts = {mag: len(entry['images'].get(mag, [])) for mag in self.mags}
+            min_images = min(mag_counts.values())
+            max_images = max(mag_counts.values())
+            avg_images = sum(mag_counts.values()) / len(self.mags)
             stats[pid] = {
                 'min_per_mag': min_images,
+                'max_per_mag': max_images,
                 'avg_per_mag': avg_images,
-                'mag_counts': dict(mag_counts)
+                'mag_counts': mag_counts
             }
-            
         return stats
-    
+
     def _compute_effective_samples(self):
-        """Compute effective number of samples per patient using MAXIMUM utilization strategy"""
-        if not self.adaptive_sampling:
-            return {pid: self.samples_per_patient for pid in self.patient_ids}
-            
         effective = {}
         for pid in self.patient_ids:
             stats = self.patient_image_counts[pid]
-            avg_images = stats['avg_per_mag']
-            
-            # MAXIMUM utilization - use 80-95% of available images
-            if avg_images <= 15:
-                # Low volume: aggressive sampling for maximum utilization
-                samples = min(int(avg_images * 0.9), self.samples_per_patient * 3)
-            elif avg_images <= 30:
-                # Medium volume: high sampling rate
-                samples = min(int(avg_images * 0.85), self.samples_per_patient * 3)
+            if self.mode in ['val', 'test']:
+                samples = stats['min_per_mag']  # FULL utilization
             else:
-                # High volume: still high sampling with safety margin
-                samples = min(int(avg_images * 0.8), self.samples_per_patient * 3)
-                
-            effective[pid] = max(1, samples)  # At least 1 sample per patient
-            
+                avg_images = stats['avg_per_mag']
+                base = self.samples_per_patient or 1
+                if avg_images <= 15:
+                    samples = int(avg_images * 0.9)
+                elif avg_images <= 30:
+                    samples = int(avg_images * 0.85)
+                else:
+                    samples = int(avg_images * 0.8)
+                # Cap to avoid unrealistic oversampling
+                samples = min(samples, stats['min_per_mag'] * 2, base * 3)
+            effective[pid] = max(1, samples)
         return effective
-    
+
     def set_epoch(self, epoch):
-        """Set epoch for deterministic sampling across workers"""
         self.epoch_seed = epoch
-        
+
     def __len__(self):
         return sum(self.effective_samples.values()) * self.epoch_multiplier
 
     def __getitem__(self, idx):
-        # Map flat index to (patient_id, sample_within_patient)
         cumulative = 0
-        target_patient = None
-        sample_idx = 0
-        
-        # Adjust index for epoch multiplier
+        target_patient, sample_idx = None, 0
         epoch_offset = idx // sum(self.effective_samples.values())
         adjusted_idx = idx % sum(self.effective_samples.values())
-        
         for pid in self.patient_ids:
             patient_samples = self.effective_samples[pid]
             if adjusted_idx < cumulative + patient_samples:
@@ -114,127 +106,59 @@ class MultiMagPatientDataset(Dataset):
                 sample_idx = adjusted_idx - cumulative
                 break
             cumulative += patient_samples
-        
         if target_patient is None:
             target_patient = self.patient_ids[0]
-            sample_idx = 0
-            
         return self._get_patient_sample(target_patient, sample_idx, epoch_offset)
-    
+
     def _get_patient_sample(self, pid, sample_idx, epoch_offset):
-        """Get a specific sample for a patient"""
         entry = self.patient_dict[pid]
-        images_dict = {}
-        label = entry['label']
-        
-        # Create deterministic but varied sampling using epoch and sample index
+        images_dict, mask = {}, []
         random_state = random.Random(self.epoch_seed * 1000 + hash(pid) + sample_idx + epoch_offset)
-        
-        # Group images by magnification
-        mag_to_files = {mag: [] for mag in self.mags}
-        for fpath in entry['images']:
-            mag = os.path.basename(os.path.dirname(fpath)).replace('X', '')
-            if mag in mag_to_files:
-                mag_to_files[mag].append(fpath)
-        
-        # Sample images for each magnification
         for mag in self.mags:
-            files = mag_to_files[mag]
-            if not files:
-                # Fallback: sample from any available images
-                files = [f for f in entry['images'] 
-                        if os.path.basename(os.path.dirname(f)).replace('X', '') in self.mags]
-                if not files:
-                    files = entry['images']
-            
-            # Deterministic sampling with replacement if needed
-            if len(files) > sample_idx:
-                img_path = files[sample_idx % len(files)]
+            files = entry['images'].get(mag, [])
+            if files:
+                if self.mode == 'train':
+                    img_path = files[sample_idx % len(files)] if len(files) > sample_idx else random_state.choice(files)
+                else:
+                    img_path = files[sample_idx % len(files)]  # deterministic for val/test
+                img = Image.open(img_path).convert('RGB')
+                img = self.transform(img) if self.transform else img
+                mask.append(1)
             else:
-                img_path = random_state.choice(files)
-                
-            img = Image.open(img_path).convert('RGB')
-            if self.transform:
-                img = self.transform(img)
+                img = torch.zeros((3, 224, 224))
+                mask.append(0)
             images_dict[f'mag_{mag}'] = img
-            
-        return images_dict, label
-    
+        return images_dict, torch.tensor(mask, dtype=torch.float32), entry['label']
+
     def _setup_class_balanced_sampling(self):
-        """Setup class-balanced sampling weights for imbalanced datasets"""
-        # Group patients by class
         self.class_to_patients = defaultdict(list)
         for pid in self.patient_ids:
-            label = self.patient_dict[pid]['label']
-            self.class_to_patients[label].append(pid)
-        
-        # Calculate class weights
-        class_counts = {cls: len(patients) for cls, patients in self.class_to_patients.items()}
-        total_patients = len(self.patient_ids)
-        self.class_weights = {
-            cls: total_patients / (len(class_counts) * count) 
-            for cls, count in class_counts.items()
-        }
-        
-        # Create patient weights for balanced sampling
-        self.patient_weights = {}
-        for cls, patients in self.class_to_patients.items():
-            weight = self.class_weights[cls] / len(patients)
-            for pid in patients:
-                self.patient_weights[pid] = weight
-    
+            self.class_to_patients[self.patient_dict[pid]['label']].append(pid)
+        class_counts = {cls: len(pats) for cls, pats in self.class_to_patients.items()}
+        total = len(self.patient_ids)
+        self.class_weights = {cls: total / (len(class_counts) * count) for cls, count in class_counts.items()}
+        self.patient_weights = {pid: self.class_weights[label] / len(pats)
+                                for label, pats in self.class_to_patients.items() for pid in pats}
+
     def get_class_balanced_sampler(self):
-        """Create a WeightedRandomSampler for class-balanced training"""
-        if not self.class_balanced_sampling:
+        if not self.class_balanced_sampling or self.mode != 'train':
             return None
-        
-        # Create weights for each sample based on patient class weights
-        sample_weights = []
-        for pid in self.patient_ids:
-            patient_weight = self.patient_weights[pid]
-            samples_count = self.effective_samples[pid] * self.epoch_multiplier
-            sample_weights.extend([patient_weight] * samples_count)
-        
-        return WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(sample_weights),
-            replacement=True
-        )
-    
+        sample_weights = [self.patient_weights[pid] for pid in self.patient_ids for _ in range(self.effective_samples[pid] * self.epoch_multiplier)]
+        return WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
+
     def get_sampling_stats(self):
-        """Get comprehensive statistics about sampling strategy"""
         total_samples = sum(self.effective_samples.values()) * self.epoch_multiplier
-        patient_stats = []
-        
-        # Count samples per class
         class_samples = defaultdict(int)
         for pid in self.patient_ids:
             label = self.patient_dict[pid]['label']
-            samples = self.effective_samples[pid] * self.epoch_multiplier
-            class_samples[label] += samples
-            
-            stats = self.patient_image_counts[pid]
-            patient_stats.append({
-                'patient_id': pid,
-                'label': label,
-                'avg_images_per_mag': stats['avg_per_mag'],
-                'samples_per_epoch': samples,
-                'utilization_rate': (samples / (stats['avg_per_mag'] * self.epoch_multiplier)) if stats['avg_per_mag'] > 0 else 0,
-                'epoch_multiplier': self.epoch_multiplier
-            })
-            
+            class_samples[label] += self.effective_samples[pid] * self.epoch_multiplier
+
+        # Oversampling factor: total samples / sum of unique full multi-mag sets
+        total_unique_sets = sum(stats['min_per_mag'] for stats in self.patient_image_counts.values())
+        oversampling_factor = round(total_samples / (total_unique_sets or 1), 2)
+
         return {
             'total_samples_per_epoch': total_samples,
             'class_distribution': dict(class_samples),
-            'class_weights': self.class_weights if self.class_balanced_sampling else None,
-            'patient_details': patient_stats,
-            'avg_utilization': sum(p['utilization_rate'] for p in patient_stats) / len(patient_stats)
+            'oversampling_factor': oversampling_factor
         }
-
-
-# Legacy dataset for backward compatibility
-class LegacyMultiMagPatientDataset(MultiMagPatientDataset):
-    """Legacy dataset that maintains old behavior (1 sample per patient)"""
-    def __init__(self, patient_dict, patient_ids, mags=['40', '100', '200', '400'], transform=None):
-        super().__init__(patient_dict, patient_ids, mags, transform, 
-                        samples_per_patient=1, adaptive_sampling=False)

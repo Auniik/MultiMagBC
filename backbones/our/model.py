@@ -99,6 +99,93 @@ class HierarchicalMagnificationAttention(nn.Module):
         return hier_out
 
 
+# GeM pooling (for discriminative histopath features)
+class GeM(nn.Module):
+    def __init__(self, p=3.0, eps=1e-6):
+        super().__init__()
+        self.p = nn.Parameter(torch.ones(1) * p)
+        self.eps = eps
+
+    def forward(self, x):
+        x = x.clamp(min=self.eps).pow(self.p)
+        if x.ndim == 4:  # [B, C, H, W]
+            x = F.adaptive_avg_pool2d(x, 1)
+        elif x.ndim == 2:  # [B, C]
+            x = x.unsqueeze(-1).unsqueeze(-1)  # make it [B, C, 1, 1]
+        else:
+            raise ValueError(f"Unexpected tensor shape {x.shape} for GeM pooling")
+        return x.pow(1.0 / self.p)
+    
+class HybridCrossMagFusion(nn.Module):
+    def __init__(self, channels_list, output_channels=256, num_heads=8, dropout=0.3):
+        super().__init__()
+        self.num_mags = len(channels_list)
+
+        # Learnable magnification importance
+        self.mag_importance = nn.Parameter(torch.ones(self.num_mags))
+
+        # GeM pooling
+        self.gem = GeM()
+
+        # Align features to common dimension
+        self.align_blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(channels, output_channels),
+                nn.BatchNorm1d(output_channels),
+                nn.ReLU(inplace=True)
+            ) for channels in channels_list
+        ])
+
+        # Cross-magnification attention
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=output_channels,
+            num_heads=num_heads,
+            dropout=0.1,
+            batch_first=True
+        )
+
+        # Fusion block
+        self.fusion = nn.Sequential(
+            nn.Linear(output_channels * self.num_mags, output_channels * 2),
+            nn.BatchNorm1d(output_channels * 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(output_channels * 2, output_channels)
+        )
+
+        # Residual weighting
+        self.res_weight = nn.Parameter(torch.tensor(0.5))
+
+    def forward(self, *features_list, mask=None):
+        # Step 1: Align (no pooling needed, inputs are [B, C])
+        aligned_feats = []
+        for features, align in zip(features_list, self.align_blocks):
+            if features.ndim == 1:  # Add batch dim if missing
+                features = features.unsqueeze(0)
+            aligned_feats.append(align(features))
+        aligned_feats = torch.stack(aligned_feats, dim=1)  # [B, mags, C]
+
+        # Step 2: Magnification importance weighting
+        weights = F.softmax(self.mag_importance, dim=0)  # [num_mags]
+        weights = weights.view(1, self.num_mags, 1)      # [1, mags, 1]
+        if mask is not None:
+            mask = mask.unsqueeze(-1)                    # [B, mags, 1]
+            weights = weights * mask
+            weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
+
+        weighted_feats = aligned_feats * weights  # [B, mags, C]
+
+        # Step 3: Cross-magnification attention
+        attn_out, _ = self.cross_attention(weighted_feats, weighted_feats, weighted_feats)
+        global_feat = attn_out.mean(dim=1)  # [B, C]
+
+        # Step 4: Concatenation-based fusion
+        concat_feat = torch.cat([f for f in aligned_feats.unbind(dim=1)], dim=1)
+        fused_feat = self.fusion(concat_feat)
+
+        # Step 5: Residual combination
+        return self.res_weight * global_feat + (1 - self.res_weight) * fused_feat
+
 class ClinicalCrossMagFusion(nn.Module):
     def __init__(self, feat_dim, num_mags):
         super().__init__()
@@ -149,8 +236,14 @@ class MMNet(nn.Module):
         })
 
         self.hierarchical_attn = HierarchicalMagnificationAttention(self.feat_channels)
-        self.cross_mag_fusion = ClinicalCrossMagFusion(self.feat_channels, len(magnifications))
-
+        # self.cross_mag_fusion = ClinicalCrossMagFusion(self.feat_channels, len(magnifications))
+        self.cross_mag_fusion = HybridCrossMagFusion(
+            channels_list=[self.feat_channels] * len(magnifications),
+            output_channels=self.feat_channels,
+            num_heads=8,
+            dropout=dropout
+        )
+        
         self.dropout = nn.Dropout(p=dropout)
         self.classifier = nn.Sequential(
             nn.Linear(self.feat_channels, 512),
@@ -159,8 +252,9 @@ class MMNet(nn.Module):
             self.dropout,
             nn.Linear(512, num_classes)
         )
-
-    def forward(self, images_dict):
+    
+    def forward(self, images_dict, mask=None):
+        # Extract features per magnification
         channel_outs = {}
         for mag in self.magnifications:
             x = images_dict[f'mag_{mag}']
@@ -170,9 +264,17 @@ class MMNet(nn.Module):
             x, _ = self.spatial_att[f'sp_att_{mag}x'](x)
             channel_outs[mag] = x
 
+        # Hierarchical magnification attention
         hier_feats = self.hierarchical_attn(channel_outs)
-        fused = self.cross_mag_fusion(hier_feats)
+        
+        # Convert dict → ordered list for fusion
+        features_list = [hier_feats[mag] for mag in self.magnifications]
+
+        # Cross-magnification fusion (now fully integrated)
+        fused = self.cross_mag_fusion(*features_list, mask=mask)
         fused = self.dropout(fused)
+
+        # Classification head
         logits = self.classifier(fused)
         return logits
 
@@ -183,5 +285,6 @@ class MMNet(nn.Module):
         print(f"Total params: {total:,}, Trainable: {trainable:,}")
 
     def get_magnification_importance(self):
-        weights = F.softmax(self.cross_mag_fusion.mag_importance, dim=0)
-        return {mag: float(weights[i]) for i, mag in enumerate(self.magnifications)}
+        with torch.no_grad():
+            weights = F.softmax(self.cross_mag_fusion.mag_importance, dim=0)
+        return {mag: float(weights[i].cpu()) for i, mag in enumerate(self.magnifications)}

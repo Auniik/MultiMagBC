@@ -75,35 +75,42 @@ def main():
 
     fold_metrics = []
     importance_scores = []
-    for fold_idx, (train_pats, test_pats) in enumerate(splitter.folds):
+    for fold_idx in range(len(splitter.folds)):
         print(f"\n===== Fold {fold_idx} =====")
-        print(f"Train patients: {len(train_pats)}, Test patients: {len(test_pats)}")
-        
-        train_ds = MultiMagPatientDataset(
-            patient_dict, train_pats, transform=train_transform,
-            samples_per_patient=SAMPLES_PER_PATIENT_BALANCED,  # Balanced 5 samples
-            epoch_multiplier=EPOCH_MULTIPLIER_BALANCED,     # 3x diverse combinations
-            adaptive_sampling=True  # Balanced utilization strategy
-        )
 
-        test_ds = MultiMagPatientDataset(
-            patient_dict, test_pats, transform=eval_transform,
-            samples_per_patient=1,
-            adaptive_sampling=False,
-            epoch_multiplier=1 
-        )
-        
+        train_pats, val_pats, test_pats = splitter.get_fold(fold_idx)
+        print(f"Train patients: {len(train_pats)}, Val Patients: {len(val_pats)}, Test patients: {len(test_pats)}")
+
+        train_ds = MultiMagPatientDataset(patient_dict, train_pats, transform=train_transform, mode='train')
+        val_ds = MultiMagPatientDataset(patient_dict, val_pats, transform=eval_transform, mode='val', full_utilization_mode='all')
+        test_ds = MultiMagPatientDataset(patient_dict, test_pats, transform=eval_transform, mode='test', full_utilization_mode='all')
+
         train_stats = train_ds.get_sampling_stats()
+        print(f"Training samples per epoch: {train_stats}")
+        print(f"Validation samples: {len(val_ds)}, Test samples: {len(test_ds)}")
+        print(f"Patients with full 4 mags: {sum(1 for p in train_pats if sum(len(train_ds.patient_dict[p]['images'][m]) > 0 for m in ['40','100','200','400']) == 4)}")
 
-        print(f"Training samples per epoch: {train_stats['total_samples_per_epoch']} "
-              f"(avg utilization: {train_stats['avg_utilization']:.1%})")
+        samples_per_epoch = train_stats['total_samples_per_epoch']
+        # Dynamic batch size adjustment for MAXIMUM utilization Ensure batch size doesn't exceed reasonable limits for stability
+        effective_batch_size = min(max(16, samples_per_epoch // 200), 32)
+        print(f"Inner training samples: {samples_per_epoch}, batch size: {effective_batch_size}")
+        
+        sampler = train_ds.get_class_balanced_sampler()
+        train_loader = DataLoader(
+            train_ds, batch_size=effective_batch_size,
+            sampler=sampler if sampler else None,
+            shuffle=(sampler is None),
+            num_workers=config['num_workers'], pin_memory=config['pin_memory'],
+            drop_last=True
+        )
         
         test_loader = DataLoader(
-            test_ds,
-            batch_size=config['batch_size'],
-            shuffle=False, 
-            num_workers=config['num_workers'],
-            pin_memory=config['pin_memory']
+            test_ds, batch_size=config['batch_size'], shuffle=False, 
+            num_workers=config['num_workers'], pin_memory=config['pin_memory']
+        )
+        val_loader = DataLoader(
+            val_ds, batch_size=config['batch_size'], shuffle=False, 
+            num_workers=config['num_workers'], pin_memory=config['pin_memory']
         )
 
         train_labels = [train_ds.patient_dict[pid]['label'] for pid in train_pats]
@@ -118,52 +125,6 @@ def main():
             optimizer, mode='max', factor=LR_SCHEDULER_FACTOR, 
             patience=LR_SCHEDULER_PATIENCE
         )
-
-        # Split training data into train/validation for nested CV (increased validation size)
-        train_pats_inner, val_pats = train_test_split(train_pats, test_size=0.3, random_state=42, stratify=[train_ds.patient_dict[pid]['label'] for pid in train_pats])
-        
-        # Create inner validation dataset with BALANCED sampling
-        val_ds = MultiMagPatientDataset(
-            patient_dict, val_pats, transform=eval_transform,
-            samples_per_patient=VAL_SAMPLES_PER_PATIENT_BALANCED,  # Balanced 2 samples
-            epoch_multiplier=1,     # Single epoch for consistent validation
-            adaptive_sampling=False  # Consistent validation sampling
-        )
-        val_loader = DataLoader(val_ds, batch_size=config['batch_size'], shuffle=False, 
-                              num_workers=config['num_workers'], pin_memory=config['pin_memory'])
-        
-        # Update training loader with BALANCED utilization sampling
-        train_ds_inner = MultiMagPatientDataset(
-            patient_dict, train_pats_inner, transform=train_transform,
-            samples_per_patient=SAMPLES_PER_PATIENT_BALANCED,  # Balanced 5 samples
-            epoch_multiplier=EPOCH_MULTIPLIER_BALANCED,     # 3x diverse combinations
-            adaptive_sampling=True  # Balanced utilization strategy
-        )
-        
-        # Adjust batch size for increased data volume
-        inner_train_stats = train_ds_inner.get_sampling_stats()
-        samples_per_epoch = inner_train_stats['total_samples_per_epoch']
-        
-        # Dynamic batch size adjustment for MAXIMUM utilization
-        target_batch_size = min(config['batch_size'] * 2, 32)  # Double batch size for larger datasets
-        
-        # Ensure batch size doesn't exceed reasonable limits for stability
-        if samples_per_epoch > 4000:
-            effective_batch_size = min(target_batch_size, 32)
-        elif samples_per_epoch > 2000:
-            effective_batch_size = min(target_batch_size, 24)
-        else:
-            effective_batch_size = min(target_batch_size, 16)
-            
-        print(f"Inner training samples: {samples_per_epoch}, batch size: {effective_batch_size}")
-        
-        train_loader_inner = DataLoader(
-            train_ds_inner, batch_size=effective_batch_size, shuffle=True, 
-            num_workers=config['num_workers'], pin_memory=config['pin_memory'], 
-            drop_last=True
-        )
-        
-        print(f"Inner split: Train {len(train_pats_inner)}, Val {len(val_pats)} patients")
         
         best_val_bal_acc = 0
         epochs_no_improve = 0
@@ -180,15 +141,17 @@ def main():
         
         for epoch in range(1, epochs+1):
             # Set epoch for deterministic sampling diversity
-            train_ds_inner.set_epoch(epoch)
+            train_ds.set_epoch(epoch)
             train_loss, train_acc = train_one_epoch(
-                model, train_loader_inner, criterion, optimizer, device, 
-                use_mixup=True, mixup_alpha=MIXUP_ALPHA
+                model, train_loader, criterion, optimizer, device, 
+                use_mixup=True,
+                mixup_alpha=MIXUP_ALPHA
             )
             val_loss, val_acc, val_bal, val_f1, val_auc, val_prec, val_rec, threshold = eval_model_with_threshold_optimization(
-                model, val_loader, criterion, device, use_dropout=True
+                model, val_loader, criterion, device, mc_dropout=True
             )
-            
+            scheduler.step(val_bal) 
+             
             train_losses.append(train_loss)
             train_accuracies.append(train_acc)
             val_losses.append(val_loss)
@@ -207,8 +170,8 @@ def main():
             # Overfitting detection
             overfitting_warning = ""
             perfect_validation_warning = ""
-            if val_bal >= 0.995 or val_auc >= 0.995:
-                perfect_validation_warning = " [PERFECT VAL - POSSIBLE OVERFITTING]"
+            if val_loss > train_loss + 0.15:
+                overfitting_warning = " [VAL LOSS DIVERGENCE]"
             
             # Check for train-validation loss divergence
             if len(train_losses) >= overfitting_patience:
@@ -285,7 +248,7 @@ def main():
             },
             'train_patients': len(train_pats),
             'test_patients': len(test_pats),
-            'train_samples': len(train_ds_inner),
+            'train_samples': len(train_ds),
             'test_samples': len(test_ds)
         }
 
