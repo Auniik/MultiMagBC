@@ -89,7 +89,7 @@ def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
             
             # Use mixed precision for faster inference
             with safe_autocast(device):
-                logits = model(images, mask)
+                logits, _ = model(images, mask)
                 loss = criterion(logits, labels)
 
             losses.append(float(loss))
@@ -157,7 +157,7 @@ def eval_model_with_threshold_optimization(model, dataloader, criterion, device,
             mask = mask.to(device, non_blocking=True)
 
             with safe_autocast(device):
-                logits = model(images, mask)
+                logits, _ = model(images, mask)
                 # Clamp logits to avoid softmax overflow
                 logits = torch.clamp(logits, -20, 20)
                 loss = criterion(logits, labels)
