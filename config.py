@@ -66,10 +66,9 @@ class FocalLoss(torch.nn.Module):
         self.label_smoothing = label_smoothing
         
     def forward(self, inputs, targets):
-        if inputs.dim() > 2:
-            inputs = inputs.view(inputs.size(0), -1)
+        # Handle binary classification
         if inputs.size(-1) == 1:
-            inputs = inputs.squeeze(-1)
+            inputs = inputs.squeeze(-1).float()
             targets = targets.float()
             if self.label_smoothing > 0:
                 targets = targets * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
@@ -79,14 +78,17 @@ class FocalLoss(torch.nn.Module):
             pt = torch.where(targets == 1, probs, 1 - probs)
             alpha_t = torch.where(targets == 1, torch.tensor(self.alpha, device=inputs.device), torch.tensor(1 - self.alpha, device=inputs.device))
             focal_weight = alpha_t * (1 - pt) ** self.gamma
-            focal_loss = focal_weight * bce_loss
+            loss = focal_weight * bce_loss
         else:
-            ce_loss = torch.nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
+            # Multi-class
+            inputs = inputs.float()
+            targets = targets.long()
+            ce_loss = torch.nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none', label_smoothing=self.label_smoothing)
             pt = torch.exp(-ce_loss)
             focal_weight = (1 - pt) ** self.gamma
-            focal_loss = focal_weight * ce_loss
+            loss = focal_weight * ce_loss
         
-        return focal_loss.mean()
+        return loss.mean()
 
 def mixup_data(x, y, alpha=0.2, device='cuda'):
     """Implement mixup augmentation for enhanced regularization"""
