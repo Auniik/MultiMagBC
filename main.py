@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from backbones.our.model import MMNet
+from backbones.our.simple_model import SimpleMMNet
 from config import (SLIDES_PATH, LEARNING_RATE, NUM_EPOCHS, EARLY_STOPPING_PATIENCE, 
                     LR_SCHEDULER_PATIENCE, LR_SCHEDULER_FACTOR, DROPOUT_RATE, WEIGHT_DECAY,
                     SAMPLES_PER_PATIENT_BALANCED, EPOCH_MULTIPLIER_BALANCED, VAL_SAMPLES_PER_PATIENT_BALANCED,
@@ -118,16 +119,16 @@ def main():
         print(f"Class weights: Benign={class_weights[0]:.2f}, Malignant={class_weights[1]:.2f}")
         
         epochs = NUM_EPOCHS
-        model = MMNet(dropout=DROPOUT_RATE).to(device)
-        criterion = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, weight=class_weights, label_smoothing=LABEL_SMOOTHING)
-        # Use AdamW with emergency stability parameters
-        optimizer = optim.AdamW(
+        # EMERGENCY: Use ultra-simple model for debugging stability
+        model = SimpleMMNet(dropout=0.3).to(device)
+        # Use standard CrossEntropy instead of FocalLoss
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        # Use SGD instead of AdamW for maximum stability
+        optimizer = optim.SGD(
             model.parameters(), 
-            lr=LEARNING_RATE, 
-            weight_decay=WEIGHT_DECAY,
-            eps=1e-6,  # Much higher epsilon for stability
-            betas=(0.9, 0.99),  # Slightly different betas
-            amsgrad=False  # Keep False for stability
+            lr=1e-3,  # Higher LR for SGD
+            momentum=0.9,
+            weight_decay=1e-4
         )
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', factor=LR_SCHEDULER_FACTOR, 
@@ -153,9 +154,9 @@ def main():
             train_ds.set_epoch(epoch)
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterion, optimizer, device, 
-                use_mixup=True,
-                mixup_alpha=MIXUP_ALPHA,
-                accumulation_steps=2  # Use gradient accumulation for stability
+                use_mixup=False,  # Disable mixup completely
+                mixup_alpha=0.0,
+                accumulation_steps=1  # No gradient accumulation
             )
             val_loss, val_acc, val_bal, val_f1, val_auc, val_prec, val_rec, threshold = eval_model_with_threshold_optimization(
                 model, val_loader, criterion, device, mc_dropout=True

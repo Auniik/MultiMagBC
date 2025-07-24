@@ -11,94 +11,67 @@ from utils.helpers import safe_autocast
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=True, mixup_alpha=0.2, accumulation_steps=1):
     model.train()
-    scaler = torch.GradScaler(enabled=(device.type == "cuda"))
+    # EMERGENCY: Disable mixed precision completely
+    scaler = torch.GradScaler(enabled=False)
     losses = []
     all_preds, all_labels = [], []
     optimizer.zero_grad()
     
     # Initialize gradient clipping parameters  
-    max_grad_norm = 0.5  # Much more aggressive clipping
-    scaler_updated = False  # Track scaler state
+    max_grad_norm = 1.0  # Back to reasonable clipping for simple model
 
     for batch_idx, (images_dict, mask, labels) in enumerate(tqdm(dataloader, desc='Train', leave=False)):
         images = {k: v.to(device, non_blocking=True) for k, v in images_dict.items()}
         labels = labels.to(device, non_blocking=True)
         mask = mask.to(device, non_blocking=True)
 
-        with safe_autocast(device):  # AMP for forward pass
-            if use_mixup and mixup_alpha > 0:
-                mixed_images, y_a, y_b, lam = mixup_data(images, labels, mixup_alpha, device)
-                logits = model(mixed_images, mask)
-                # Clamp logits for numerical stability
-                logits = torch.clamp(logits, -20, 20)
-                loss = mixup_criterion(criterion, logits, y_a, y_b, lam)
-                lam_tensor = torch.full_like(y_a, lam)
-                dominant_labels = torch.where(lam_tensor >= 0.5, y_a, y_b)
-                preds = torch.argmax(logits, dim=1).cpu().numpy()
-                all_labels.extend(dominant_labels.cpu().numpy())
-            else:
-                logits = model(images, mask)
-                # Clamp logits for numerical stability
-                logits = torch.clamp(logits, -20, 20)
-                loss = criterion(logits, labels)
-                preds = torch.argmax(logits, dim=1).cpu().numpy()
-                all_labels.extend(labels.cpu().numpy())
+        # EMERGENCY: No mixed precision at all
+        # with safe_autocast(device):  # AMP for forward pass
+        if use_mixup and mixup_alpha > 0:
+            mixed_images, y_a, y_b, lam = mixup_data(images, labels, mixup_alpha, device)
+            logits = model(mixed_images, mask)
+            loss = mixup_criterion(criterion, logits, y_a, y_b, lam)
+            lam_tensor = torch.full_like(y_a, lam)
+            dominant_labels = torch.where(lam_tensor >= 0.5, y_a, y_b)
+            preds = torch.argmax(logits, dim=1).cpu().numpy()
+            all_labels.extend(dominant_labels.cpu().numpy())
+        else:
+            logits = model(images, mask)
+            loss = criterion(logits, labels)
+            preds = torch.argmax(logits, dim=1).cpu().numpy()
+            all_labels.extend(labels.cpu().numpy())
                 
-            # Check for NaN/Inf in loss
-            if torch.isnan(loss) or torch.isinf(loss):
-                print(f"⚠️ NaN/Inf loss detected in batch {batch_idx}. Skipping batch.")
-                optimizer.zero_grad()  # Clear gradients
-                continue
+        # Check for NaN/Inf in loss
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"⚠️ NaN/Inf loss detected in batch {batch_idx}. Skipping batch.")
+            optimizer.zero_grad()  # Clear gradients
+            continue
 
         all_preds.extend(preds)
 
-        # Scaled backward pass
-        scaler.scale(loss / accumulation_steps).backward()
+        # Simple backward pass (no scaling)
+        (loss / accumulation_steps).backward()
 
-        # Gradient accumulation & step
+        # Simple gradient step
         if (batch_idx + 1) % accumulation_steps == 0:
-            # Unscale gradients before clipping (only once per accumulation step)
-            try:
-                scaler.unscale_(optimizer)
-                scaler_updated = True
+            # Apply gradient clipping
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+            
+            # Check for exploding gradients
+            if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 5:  # More lenient for debugging
+                optimizer.step()
+            else:
+                print(f"⚠️ Large gradient norm detected: {grad_norm:.4f}. Skipping step.")
                 
-                # Apply gradient clipping
-                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-                
-                # Check for exploding gradients - much more aggressive
-                if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 2:  # Only 2x threshold now
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    print(f"⚠️ Large gradient norm detected: {grad_norm:.4f}. Skipping step.")
-                    scaler.update()  # Still need to update scaler
-                    
-            except RuntimeError as e:
-                if "unscale_() has already been called" in str(e):
-                    # Scaler already unscaled, just proceed with step
-                    grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-                    if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 10:
-                        scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    raise e
-                    
             optimizer.zero_grad()
-            scaler_updated = False
 
         losses.append(float(loss))
 
-    # Handle leftover gradients if dataloader length not divisible by accumulation_steps
-    if len(dataloader) % accumulation_steps != 0 and not scaler_updated:
-        try:
-            scaler.unscale_(optimizer)
-            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-            if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 2:  # Same aggressive threshold
-                scaler.step(optimizer)
-            scaler.update()
-        except RuntimeError as e:
-            if "unscale_() has already been called" not in str(e):
-                raise e
+    # Handle leftover gradients
+    if len(dataloader) % accumulation_steps != 0:
+        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+        if torch.isfinite(grad_norm) and grad_norm <= max_grad_norm * 5:
+            optimizer.step()
 
     acc = accuracy_score(all_labels, all_preds)
     return np.mean(losses), acc
@@ -125,10 +98,9 @@ def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
             labels = labels.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
             
-            # Use mixed precision for faster inference
-            with safe_autocast(device):
-                logits = model(images, mask)
-                loss = criterion(logits, labels)
+            # EMERGENCY: No mixed precision
+            logits = model(images, mask)
+            loss = criterion(logits, labels)
 
             losses.append(float(loss))
             probs = torch.softmax(logits, dim=1)[:, 1].float().cpu().numpy()
@@ -194,11 +166,9 @@ def eval_model_with_threshold_optimization(model, dataloader, criterion, device,
             labels = labels.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
 
-            with safe_autocast(device):
-                logits = model(images, mask)
-                # Clamp logits to avoid softmax overflow
-                logits = torch.clamp(logits, -20, 20)
-                loss = criterion(logits, labels)
+            # EMERGENCY: No mixed precision
+            logits = model(images, mask)
+            loss = criterion(logits, labels)
 
             losses.append(float(loss))
             probs = torch.softmax(logits, dim=1)[:, 1].float().cpu().numpy()
