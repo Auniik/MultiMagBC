@@ -89,9 +89,11 @@ class FocalLoss(torch.nn.Module):
             pt = torch.where(targets == 1, probs, 1 - probs)
             
             # Apply alpha weighting for class imbalance
-            alpha_t = torch.where(targets == 1, 
-                                torch.tensor(self.alpha, device=inputs.device), 
-                                torch.tensor(1 - self.alpha, device=inputs.device))
+            alpha_t = torch.where(
+                targets == 1,
+                self.alpha * torch.ones_like(targets, dtype=inputs.dtype, device=inputs.device),
+                (1 - self.alpha) * torch.ones_like(targets, dtype=inputs.dtype, device=inputs.device)
+            )
             
             # Calculate focal loss
             focal_weight = alpha_t * (1 - pt) ** self.gamma
@@ -146,7 +148,7 @@ def mixup_data(x, y, alpha=0.2, device='cuda'):
     return mixed_x, y_a, y_b, lam
 
 def mixup_criterion(criterion, pred, y_a, y_b, lam):
-    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b) 
 
 def calculate_class_weights(train_labels):
     """Calculate class weights for handling imbalanced dataset"""

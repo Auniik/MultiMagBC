@@ -39,16 +39,17 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
         all_preds.extend(preds)
 
         # Scaled backward pass
-        scaler.scale(loss / accumulation_steps).backward()
+        scaled_loss = loss / accumulation_steps
+        scaler.scale(scaled_loss).backward()
 
-        # Gradient accumulation & step
+        # Gradient accumulation & optimizer step
         if (batch_idx + 1) % accumulation_steps == 0:
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
 
-        # Only convert to float AFTER backward
+        # Only convert to float AFTER backward for logging
         losses.append(loss.item())
 
     # Handle leftover gradients if dataloader length not divisible by accumulation_steps
