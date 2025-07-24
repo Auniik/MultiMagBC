@@ -148,7 +148,7 @@ def main():
                 mixup_alpha=MIXUP_ALPHA
             )
             val_loss, val_acc, val_bal, val_f1, val_auc, val_prec, val_rec, threshold = eval_model_with_threshold_optimization(
-                model, val_loader, criterion, device, mc_dropout=True
+                model, val_loader, criterion, device, use_dropout=True
             )
             scheduler.step(val_rec)
              
