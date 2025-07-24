@@ -76,30 +76,41 @@ class HierarchicalMagnificationAttention(nn.Module):
         super().__init__()
         self.mag_hierarchy = ['40', '100', '200', '400']
         self.embeddings = nn.Parameter(torch.randn(len(self.mag_hierarchy), feat_dim))
-        
-        # Shared cross-mag attention (bi-directional)
-        self.attn = nn.MultiheadAttention(feat_dim, num_heads, batch_first=True)
-        self.norm = nn.LayerNorm(feat_dim)
+        self.attn_layers = nn.ModuleDict({
+            mag: nn.MultiheadAttention(feat_dim, num_heads, batch_first=True)
+            for mag in self.mag_hierarchy[1:]
+        })
+        self.norms = nn.ModuleDict({
+            mag: nn.LayerNorm(feat_dim)
+            for mag in self.mag_hierarchy[1:]
+        })
 
-        # Learnable gating per magnification
-        self.gates = nn.Parameter(torch.ones(len(self.mag_hierarchy)))
+        # Store last attention weights for analysis
+        self.last_attn_weights = {}
 
     def forward(self, mag_feats):
-        # Add embeddings
-        enhanced = []
+        enhanced = {}
         for i, mag in enumerate(self.mag_hierarchy):
-            enhanced.append(mag_feats[mag] + self.embeddings[i])
-        enhanced = torch.stack(enhanced, dim=1)  # [B, M, C]
+            enhanced[mag] = mag_feats[mag] + self.embeddings[i]
 
-        # Bi-directional attention across magnifications
-        attn_out, _ = self.attn(enhanced, enhanced, enhanced)  # [B, M, C]
+        hier_out = {'40': enhanced['40']}
+        self.last_attn_weights.clear()  # reset each forward
 
-        # Gating between original + attended features
-        gates = torch.sigmoid(self.gates).view(1, len(self.mag_hierarchy), 1)
-        fused = self.norm(gates * attn_out + (1 - gates) * enhanced)
+        for i, mag in enumerate(self.mag_hierarchy[1:], 1):
+            prev_feats = torch.stack([hier_out[m] for m in self.mag_hierarchy[:i]], dim=1)  # [B, i, C]
+            query = enhanced[mag].unsqueeze(1)  # [B, 1, C]
+            attended, attn_weights = self.attn_layers[mag](query, prev_feats, prev_feats)  # attn_weights: [B, 1, i]
+            fused = self.norms[mag](enhanced[mag] + attended.squeeze(1))
+            hier_out[mag] = fused
 
-        # Return as dict
-        return {mag: fused[:, i, :] for i, mag in enumerate(self.mag_hierarchy)}
+            # Save attention weights for inspection (mean over batch)
+            self.last_attn_weights[mag] = attn_weights.mean(dim=0).detach().cpu().numpy()
+
+        return hier_out
+
+    def get_last_attn_weights(self):
+        """Returns the last computed attention weights for analysis."""
+        return self.last_attn_weights
     
 class HybridCrossMagFusion(nn.Module):
     def __init__(self, channels_list, output_channels=256, num_heads=8, dropout=0.3):

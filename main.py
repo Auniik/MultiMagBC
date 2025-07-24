@@ -138,6 +138,7 @@ def main():
         overfitting_patience = 5
         overfitting_threshold = 0.1
         importance = {}
+        attn_maps = {}
         
         for epoch in range(1, epochs+1):
             # Set epoch for deterministic sampling diversity
@@ -194,7 +195,9 @@ def main():
                 epochs_no_improve = 0
                 print(f"✅ New best validation balanced accuracy: {best_val_bal_acc:.3f}, threshold: {optimal_threshold:.3f}")
                 importance = model.get_magnification_importance(val_loader, device)
-                print(f"📊 Mag Importance (Val BalAcc: {val_bal:.3f}): {importance}")
+                print(f" 📊 Mag Importance: {importance}")
+                attn_maps = model.hierarchical_attn.get_last_attn_weights()
+                print(" 📊 Attention weights per magnification:", attn_maps)
             else:
                 epochs_no_improve += 1
             
@@ -239,6 +242,7 @@ def main():
                 'thresholds': metrics['thresholds']
             },
             'magnification_importance': importance,
+            'attention_maps': attn_maps,
             'training_history': {
                 'train_losses': train_losses,
                 'train_accuracies': train_accuracies,
