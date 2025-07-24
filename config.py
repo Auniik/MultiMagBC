@@ -26,14 +26,14 @@ GRADIENT_ACCUMULATION_STEPS = 2  # Effective batch size = 16 * 2 = 32
 # Enhanced regularization settings for balanced utilization
 DROPOUT_RATE = 0.75  # Increased to prevent overfitting with more data
 WEIGHT_DECAY = 3e-3  # Moderate increase for better generalization
-LABEL_SMOOTHING = 0.1  # Balanced smoothing to prevent overconfidence
+LABEL_SMOOTHING = 0.3  # Moderate smoothing to improve robustness
 
 # Mixup augmentation settings
 MIXUP_ALPHA = 0.2  # Reverted from 0.4 - moderate augmentation
 
 # Focal loss settings for balanced utilization
-FOCAL_ALPHA = 0.5   # More balanced class weighting (vs 70.7% malignant)
-FOCAL_GAMMA = 3.0   # Increased focus on hard examples with more data
+FOCAL_ALPHA = 0.7    # prioritize malignant
+FOCAL_GAMMA = 2.0 
 
 # Model settings
 BACKBONE = 'efficientnet_b0'

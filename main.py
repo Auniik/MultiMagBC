@@ -150,7 +150,7 @@ def main():
             val_loss, val_acc, val_bal, val_f1, val_auc, val_prec, val_rec, threshold = eval_model_with_threshold_optimization(
                 model, val_loader, criterion, device, mc_dropout=True
             )
-            scheduler.step(val_bal) 
+            scheduler.step(val_rec)
              
             train_losses.append(train_loss)
             train_accuracies.append(train_acc)
@@ -279,19 +279,17 @@ def main():
         
         gradcam_count = 0
         sample_idx = 0
-        for images_dict, labels in test_loader:
+        for images_dict, mask, labels in test_loader:
             batch_size = labels.size(0)
             for j in range(batch_size):
                 if sample_idx >= 5:
                     break
                 single_images = {k: v[j:j+1].to(device) for k, v in images_dict.items()}
+                single_mask = mask[j:j+1].to(device)
                 single_label = labels[j:j+1].to(device)
                 with torch.no_grad():
-                    outputs = model(single_images)
-                    if isinstance(outputs, tuple):
-                        logits = outputs[0]
-                    else:
-                        logits = outputs
+                    outputs = model(single_images, single_mask)
+                    logits = outputs[0] if isinstance(outputs, tuple) else outputs
                     _, predicted = logits.max(1)
                 
                 cams = gradcam.get_cam(single_images, target_class=predicted.item())
@@ -305,7 +303,6 @@ def main():
                 )
                 sample_idx += 1
                 gradcam_count += 1
-
             if sample_idx >= 5:
                 break
         

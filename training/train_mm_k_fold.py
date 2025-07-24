@@ -59,11 +59,17 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
     acc = accuracy_score(all_labels, all_preds)
     return np.mean(losses), acc
 
-def find_optimal_threshold(y_true, y_probs):
+def find_optimal_threshold(y_true, y_probs, min_t=0.1, max_t=0.9):
     precision, recall, thresholds = precision_recall_curve(y_true, y_probs)
     f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
-    best_idx = np.argmax(f1_scores)
-    return thresholds[best_idx] if 0.3 <= thresholds[best_idx] <= 0.7 else 0.5
+    
+    # Filter thresholds in expanded range
+    valid = (thresholds >= min_t) & (thresholds <= max_t)
+    if valid.sum() == 0:
+        return 0.5  # fallback
+
+    best_idx = np.argmax(f1_scores[valid])
+    return thresholds[valid][best_idx]
 
 def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
     model.eval()
