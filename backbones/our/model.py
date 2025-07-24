@@ -110,7 +110,7 @@ class HierarchicalMagnificationAttention(nn.Module):
 
     def get_last_attn_weights(self):
         """Returns the last computed attention weights for analysis."""
-        return self.last_attn_weights
+        return {mag: weights.tolist() for mag, weights in self.last_attn_weights.items()}
     
 class HybridCrossMagFusion(nn.Module):
     def __init__(self, channels_list, output_channels=256, num_heads=8, dropout=0.3):
