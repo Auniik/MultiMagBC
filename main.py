@@ -93,7 +93,7 @@ def main():
         samples_per_epoch = train_stats['total_samples_per_epoch']
         # Dynamic batch size adjustment for MAXIMUM utilization Ensure batch size doesn't exceed reasonable limits for stability
         # effective_batch_size = min(max(16, samples_per_epoch // 200), 32)
-        effective_batch_size=128
+        effective_batch_size=64
         print(f"Inner training samples: {samples_per_epoch}, batch size: {effective_batch_size}")
         
         sampler = train_ds.get_class_balanced_sampler()
