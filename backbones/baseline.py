@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import timm
 
-from config import MAGNIFICATIONS
 
 class SimpleConcatBaseline(nn.Module):
     def __init__(self, backbone_name='mobilenetv3_small_100', num_classes=2):
@@ -13,8 +12,8 @@ class SimpleConcatBaseline(nn.Module):
             feature_dim = self.backbone(dummy_input).shape[1]
         self.classifier = nn.Linear(feature_dim * 4, num_classes)  # 4 magnifications
 
-    def forward(self, images_dict):
-        feats = [self.backbone(images_dict[f'mag_{m}']) for m in MAGNIFICATIONS]
+    def forward(self, images_dict, mask=None):
+        feats = [self.backbone(images_dict[f'mag_{m}']) for m in ['40', '100', '200', '400']]
         concat_feat = torch.cat(feats, dim=1)
         return self.classifier(concat_feat)
     
