@@ -101,18 +101,24 @@ def main():
             sampler=sampler if sampler else None,
             shuffle=(sampler is None),
             num_workers=config['num_workers'], pin_memory=config['pin_memory'],
-            drop_last=True
+            drop_last=True,
+            prefetch_factor=2,
+            persistent_workers=True
         )
         
         test_loader = DataLoader(
             test_ds, batch_size=config['batch_size'], shuffle=False, 
-            num_workers=config['num_workers'], pin_memory=config['pin_memory']
+            num_workers=config['num_workers'], pin_memory=config['pin_memory'],
+            prefetch_factor=2,
+            persistent_workers=True
         )
         val_loader = DataLoader(
             val_ds, batch_size=config['batch_size'], shuffle=False, 
-            num_workers=config['num_workers'], pin_memory=config['pin_memory']
+            num_workers=config['num_workers'], pin_memory=config['pin_memory'],
+            prefetch_factor=2,
+            persistent_workers=True
         )
-
+        
         train_labels = [train_ds.patient_dict[pid]['label'] for pid in train_pats]
         class_weights = calculate_class_weights(train_labels).to(device)
         print(f"Class weights: Benign={class_weights[0]:.2f}, Malignant={class_weights[1]:.2f}")
