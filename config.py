@@ -170,8 +170,8 @@ def get_training_config():
     device = get_device()
     
     if device.type == 'cuda':
-        batch_size = 256
-        num_workers = 16
+        batch_size = 16
+        num_workers = 8
         environment = 'cuda'
     elif device.type == 'mps':
         batch_size = 8
