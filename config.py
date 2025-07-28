@@ -27,7 +27,7 @@ GRADIENT_ACCUMULATION_STEPS = 1  # Effective batch size = 16 * 2 = 32
 DROPOUT_RATE = 0.75  # Increased to prevent overfitting with more data
 WEIGHT_DECAY = 3e-3  # Moderate increase for better generalization
 LABEL_SMOOTHING = 0.1  # Balanced smoothing to prevent overconfidence
-    
+
 # Mixup augmentation settings
 MIXUP_ALPHA = 0.2  # Reverted from 0.4 - moderate augmentation
 
@@ -170,7 +170,7 @@ def get_training_config():
     device = get_device()
     
     if device.type == 'cuda':
-        batch_size = 64
+        batch_size = 256
         num_workers = 16
         environment = 'cuda'
     elif device.type == 'mps':

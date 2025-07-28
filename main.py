@@ -125,6 +125,14 @@ def main():
         
         epochs = NUM_EPOCHS
         model = MMNet(dropout=DROPOUT_RATE).to(device)
+        
+        # Compile model for better GPU utilization (PyTorch 2.0+)
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            print("✅ Model compiled with torch.compile for optimization")
+        except Exception as e:
+            print(f"⚠️ torch.compile not available: {e}")
+        
         criterion = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, weight=class_weights, label_smoothing=LABEL_SMOOTHING)
         optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
