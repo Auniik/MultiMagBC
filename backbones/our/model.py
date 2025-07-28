@@ -1,280 +1,446 @@
+#!/usr/bin/env python3
+"""
+MultiMagLightweightCNN - Lightweight Multi-Magnification Network for Histopathology
+
+A parameter-efficient CNN designed for the BreakHis dataset that processes
+multiple magnifications (40x, 100x, 200x, 400x) with attention mechanisms.
+
+Key Features:
+- Depthwise separable convolutions (MobileNet-inspired)
+- Shared shallow features across magnifications
+- Magnitude-specific processing branches
+- Attention-guided feature selection
+- Cross-magnification fusion
+- ~200-500K parameters (vs 5M+ for EfficientNet-based models)
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import timm
+from typing import Dict, Tuple, Optional, List
 
 
-class MultiScaleAttentionPool(nn.Module):
-    def __init__(self, in_channels, scales=[1, 2, 4]):
+class InvertedResidual(nn.Module):
+    """
+    MobileNetV2-style inverted residual block with depthwise separable convolution.
+    
+    This is the core building block that provides efficiency through:
+    1. Expansion layer (1x1 conv)
+    2. Depthwise convolution (3x3)
+    3. Projection layer (1x1 conv)
+    """
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1, expand_ratio: int = 6):
         super().__init__()
-        self.scale_attentions = nn.ModuleList([
-            nn.Sequential(
-                nn.AdaptiveAvgPool2d(scale),
-                nn.Conv2d(in_channels, in_channels // 4, 1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(in_channels // 4, 1, 1),
-                nn.Sigmoid()
-            ) for scale in scales
+        hidden_dim = in_channels * expand_ratio
+        self.use_residual = stride == 1 and in_channels == out_channels
+        
+        layers = []
+        
+        # Expand
+        if expand_ratio != 1:
+            layers.extend([
+                nn.Conv2d(in_channels, hidden_dim, 1, bias=False),
+                nn.BatchNorm2d(hidden_dim),
+                nn.ReLU6(inplace=True)
+            ])
+        
+        # Depthwise convolution
+        layers.extend([
+            nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False),
+            nn.BatchNorm2d(hidden_dim),
+            nn.ReLU6(inplace=True)
         ])
-        self.scale_fusion = nn.Conv2d(len(scales), 1, 1)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        scale_maps = []
-        for module in self.scale_attentions:
-            attn = module(x)
-            attn = F.interpolate(attn, size=(H, W), mode='bilinear', align_corners=False)
-            scale_maps.append(attn)
-        stacked = torch.cat(scale_maps, dim=1)
-        fused_attn = self.sigmoid(self.scale_fusion(stacked))
-        attended = x * fused_attn
-        pooled = F.adaptive_avg_pool2d(attended, 1).flatten(1)
-        return pooled, fused_attn
+        
+        # Project
+        layers.extend([
+            nn.Conv2d(hidden_dim, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels)
+        ])
+        
+        self.conv = nn.Sequential(*layers)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.use_residual:
+            return x + self.conv(x)
+        return self.conv(x)
 
 
-class ClinicalChannelAttention(nn.Module):
-    def __init__(self, channels, reduction=12):
+class ChannelSpatialAttention(nn.Module):
+    """
+    Lightweight attention module combining channel and spatial attention.
+    
+    Channel attention: Focuses on 'what' is important
+    Spatial attention: Focuses on 'where' is important
+    """
+    def __init__(self, channels: int, reduction: int = 8):
         super().__init__()
-        reduced = max(channels // reduction, 8)
-        self.global_avg = nn.AdaptiveAvgPool2d(1)
-        self.global_max = nn.AdaptiveMaxPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(channels * 2, reduced, bias=False),
+        
+        # Channel attention
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, channels // reduction, 1),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(reduced, channels, bias=False),
+            nn.Conv2d(channels // reduction, channels, 1),
             nn.Sigmoid()
         )
-
-    def forward(self, x):
-        b, c = x.shape[0], x.shape[1]
-        avg = self.global_avg(x).view(b, c)
-        mx = self.global_max(x).view(b, c)
-        combined = torch.cat([avg, mx], dim=1)
-        attn = self.fc(combined).view(b, c, 1, 1)
-        return x * attn.expand_as(x), attn.squeeze()
-
-
-class StochasticDepth(nn.Module):
-    def __init__(self, drop_prob=0.1):
-        super().__init__()
-        self.drop_prob = drop_prob
-
-    def forward(self, x):
-        if not self.training or self.drop_prob == 0.0:
-            return x
-        keep_prob = 1.0 - self.drop_prob
-        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-        rand = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
-        rand.floor_()
-        return x * rand / keep_prob
-
-
-class HierarchicalMagnificationAttention(nn.Module):
-    def __init__(self, feat_dim, num_heads=8):
-        super().__init__()
-        self.mag_hierarchy = ['40', '100', '200', '400']
-        self.embeddings = nn.Parameter(torch.randn(len(self.mag_hierarchy), feat_dim))
-        self.attn_layers = nn.ModuleDict({
-            mag: nn.MultiheadAttention(feat_dim, num_heads, batch_first=True)
-            for mag in self.mag_hierarchy[1:]
-        })
-        self.norms = nn.ModuleDict({
-            mag: nn.LayerNorm(feat_dim)
-            for mag in self.mag_hierarchy[1:]
-        })
-
-    def forward(self, mag_feats):
-        enhanced = {}
-        for i, mag in enumerate(self.mag_hierarchy):
-            enhanced[mag] = mag_feats[mag] + self.embeddings[i]
-        hier_out = {'40': enhanced['40']}
-        for i, mag in enumerate(self.mag_hierarchy[1:], 1):
-            prev_feats = torch.stack([hier_out[m] for m in self.mag_hierarchy[:i]], dim=1)
-            query = enhanced[mag].unsqueeze(1)
-            attended, _ = self.attn_layers[mag](query, prev_feats, prev_feats)
-            fused = self.norms[mag](enhanced[mag] + attended.squeeze(1))
-            hier_out[mag] = fused
-        return hier_out
+        
+        # Spatial attention
+        self.spatial_attention = nn.Sequential(
+            nn.Conv2d(channels, 1, kernel_size=7, padding=3),
+            nn.Sigmoid()
+        )
+        
+        # For attention map extraction
+        self.last_channel_attention = None
+        self.last_spatial_attention = None
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Channel attention
+        ca = self.channel_attention(x)
+        x_ca = x * ca
+        
+        # Spatial attention  
+        sa = self.spatial_attention(x_ca)
+        x_out = x_ca * sa
+        
+        # Store for visualization
+        self.last_channel_attention = ca
+        self.last_spatial_attention = sa
+        
+        return x_out
     
-class HybridCrossMagFusion(nn.Module):
-    def __init__(self, channels_list, output_channels=256, num_heads=8, dropout=0.3):
+    def get_attention_maps(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return the last computed attention maps"""
+        return self.last_channel_attention, self.last_spatial_attention
+
+
+class CrossMagFusionLight(nn.Module):
+    """
+    Lightweight cross-magnification fusion module.
+    
+    Learns optimal weighting of features from different magnifications
+    and combines them through attention mechanism.
+    """
+    def __init__(self, feat_dim: int, num_mags: int = 4):
         super().__init__()
-        self.num_mags = len(channels_list)
-
-        # Per-sample feature-driven importance (MLP-based)
-        self.mag_importance_mlp = nn.Sequential(
-            nn.Linear(output_channels, output_channels // 4),
+        
+        # Attention weights for each magnification
+        self.attention = nn.Sequential(
+            nn.Linear(feat_dim * num_mags, feat_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(output_channels // 4, 1)
+            nn.Linear(feat_dim, num_mags),
+            nn.Softmax(dim=1)
         )
-
-        # Align features to common dimension
-        self.align_blocks = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(channels, output_channels),
-                nn.BatchNorm1d(output_channels),
-                nn.ReLU(inplace=True)
-            ) for channels in channels_list
-        ])
-
-        # Cross-magnification attention
-        self.cross_attention = nn.MultiheadAttention(
-            embed_dim=output_channels,
-            num_heads=num_heads,
-            dropout=0.1,
-            batch_first=True
-        )
-
-        # Fusion block
+        
+        # Feature fusion network
         self.fusion = nn.Sequential(
-            nn.Linear(output_channels * self.num_mags, output_channels * 2),
-            nn.BatchNorm1d(output_channels * 2),
+            nn.Linear(feat_dim * num_mags, feat_dim * 2),
+            nn.BatchNorm1d(feat_dim * 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(feat_dim * 2, feat_dim),
+            nn.BatchNorm1d(feat_dim)
+        )
+        
+        # Learnable residual weight
+        self.residual_weight = nn.Parameter(torch.tensor(0.5))
+        
+        # For visualization
+        self.last_attention_weights = None
+        
+    def forward(self, mag_features: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # Stack features in consistent order
+        mags = ['40', '100', '200', '400']
+        feats = [mag_features[mag] for mag in mags]
+        stacked = torch.stack(feats, dim=1)  # [B, 4, feat_dim]
+        concat = torch.cat(feats, dim=1)      # [B, 4*feat_dim]
+        
+        # Compute attention weights
+        weights = self.attention(concat)      # [B, 4]
+        self.last_attention_weights = weights
+        
+        # Weighted combination
+        weighted = (stacked * weights.unsqueeze(-1)).sum(dim=1)  # [B, feat_dim]
+        
+        # Feature fusion
+        fused = self.fusion(concat)
+        
+        # Residual connection with learnable weight
+        output = self.residual_weight * weighted + (1 - self.residual_weight) * fused
+        
+        return output
+    
+    def get_attention_weights(self) -> torch.Tensor:
+        """Return the last computed attention weights"""
+        return self.last_attention_weights
+
+
+class MultiMagLightweightCNN(nn.Module):
+    """
+    Lightweight Multi-Magnification CNN for Histopathology Classification.
+    
+    Processes four magnifications (40x, 100x, 200x, 400x) with shared shallow
+    features and magnitude-specific deep features, combined through attention.
+    
+    Args:
+        num_classes: Number of output classes (default: 2 for binary classification)
+        base_channels: Base number of channels (default: 24)
+        dropout: Dropout rate for classifier (default: 0.3)
+        num_blocks_per_mag: Dictionary mapping magnifications to number of blocks
+    """
+    
+    def __init__(
+        self, 
+        num_classes: int = 2,
+        base_channels: int = 24,
+        dropout: float = 0.3,
+        num_blocks_per_mag: Optional[Dict[str, int]] = None
+    ):
+        super().__init__()
+        
+        self.magnifications = ['40', '100', '200', '400']
+        
+        # Default number of blocks per magnification
+        if num_blocks_per_mag is None:
+            num_blocks_per_mag = {
+                '40': 2,   # Lower magnification = fewer blocks
+                '100': 2,
+                '200': 3,  # Higher magnification = more blocks
+                '400': 3
+            }
+        
+        # Shared shallow feature extractor
+        self.shared_stem = nn.Sequential(
+            # Initial convolution
+            nn.Conv2d(3, base_channels, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(base_channels),
+            nn.ReLU6(inplace=True),
+            
+            # Depthwise separable block
+            nn.Conv2d(base_channels, base_channels, 3, stride=1, padding=1, 
+                     groups=base_channels, bias=False),
+            nn.BatchNorm2d(base_channels),
+            nn.ReLU6(inplace=True),
+            
+            # Expand channels
+            nn.Conv2d(base_channels, base_channels * 2, 1, bias=False),
+            nn.BatchNorm2d(base_channels * 2),
+            nn.ReLU6(inplace=True)
+        )
+        
+        # Magnitude-specific processing branches
+        self.mag_branches = nn.ModuleDict()
+        for mag in self.magnifications:
+            self.mag_branches[mag] = self._make_mag_branch(
+                base_channels * 2, 
+                base_channels * 4,
+                num_blocks=num_blocks_per_mag[mag]
+            )
+        
+        # Attention modules for each magnification
+        self.mag_attention = nn.ModuleDict({
+            mag: ChannelSpatialAttention(base_channels * 4)
+            for mag in self.magnifications
+        })
+        
+        # Cross-magnification fusion
+        self.fusion = CrossMagFusionLight(base_channels * 4, num_mags=4)
+        
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.Linear(base_channels * 4, base_channels * 4),
+            nn.BatchNorm1d(base_channels * 4),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(output_channels * 2, output_channels)
-        )
-
-        # Residual weighting
-        self.res_weight = nn.Parameter(torch.tensor(0.5))
-
-    def forward(self, *features_list, mask=None):
-        # Step 1: Align features
-        aligned_feats = []
-        for features, align in zip(features_list, self.align_blocks):
-            if features.ndim == 1:
-                features = features.unsqueeze(0)
-            aligned_feats.append(align(features))
-        aligned_feats = torch.stack(aligned_feats, dim=1)  # [B, mags, C]
-
-        # Step 2: Compute per-sample magnification weights
-        B, M, C = aligned_feats.shape
-        raw_weights = self.mag_importance_mlp(aligned_feats)  # [B, mags, 1]
-        weights = F.softmax(raw_weights, dim=1)
-
-        if mask is not None:
-            mask = mask.unsqueeze(-1)  # [B, mags, 1]
-            weights = weights * mask
-            weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
-
-        weighted_feats = aligned_feats * weights  # [B, mags, C]
-
-        # Step 3: Cross-magnification attention
-        attn_out, _ = self.cross_attention(weighted_feats, weighted_feats, weighted_feats)
-        global_feat = attn_out.mean(dim=1)  # [B, C]
-
-        # Step 4: Concatenation-based fusion
-        concat_feat = torch.cat([f for f in aligned_feats.unbind(dim=1)], dim=1)
-        fused_feat = self.fusion(concat_feat)
-
-        # Step 5: Residual combination
-        return self.res_weight * global_feat + (1 - self.res_weight) * fused_feat
-
-
-class MMNet(nn.Module):
-    def __init__(self, magnifications=['40', '100', '200', '400'], num_classes=2, dropout=0.3, backbone='efficientnet_b1'):
-        super().__init__()
-        self.magnifications = magnifications
-        self.extractors = nn.ModuleDict({
-            f'extractor_{mag}x': timm.create_model(backbone, pretrained=True, num_classes=0, global_pool='', drop_rate=dropout * 0.5)
-            for mag in magnifications
-        })
-
-        with torch.no_grad():
-            dummy = torch.randn(1, 3, 224, 224).to('cpu')
-            self.feat_channels = self.extractors['extractor_40x'](dummy).shape[1]
-
-        self.spatial_att = nn.ModuleDict({
-            f'sp_att_{mag}x': MultiScaleAttentionPool(self.feat_channels)
-            for mag in magnifications
-        })
-
-        self.channel_att = nn.ModuleDict({
-            f'ch_att_{mag}x': ClinicalChannelAttention(self.feat_channels)
-            for mag in magnifications
-        })
-
-        self.hierarchical_attn = HierarchicalMagnificationAttention(self.feat_channels)
-        # self.cross_mag_fusion = ClinicalCrossMagFusion(self.feat_channels, len(magnifications))
-        self.cross_mag_fusion = HybridCrossMagFusion(
-            channels_list=[self.feat_channels] * len(magnifications),
-            output_channels=self.feat_channels,
-            num_heads=8,
-            dropout=dropout
-        )
-        
-        self.dropout = nn.Dropout(p=dropout)
-        self.classifier = nn.Sequential(
-            nn.Linear(self.feat_channels, 512),
-            nn.BatchNorm1d(512),
+            nn.Linear(base_channels * 4, base_channels * 2),
+            nn.BatchNorm1d(base_channels * 2),
             nn.ReLU(inplace=True),
-            self.dropout,
-            nn.Linear(512, num_classes)
+            nn.Dropout(dropout * 0.5),  # Less dropout in final layer
+            nn.Linear(base_channels * 2, num_classes)
         )
-    
-    def forward(self, images_dict, mask=None):
-        # Extract features per magnification
-        channel_outs = {}
-        for mag in self.magnifications:
-            x = images_dict[f'mag_{mag}']
-            x = self.extractors[f'extractor_{mag}x'](x)
-            x = StochasticDepth(0.1)(x)
-            x, _ = self.channel_att[f'ch_att_{mag}x'](x)
-            x, _ = self.spatial_att[f'sp_att_{mag}x'](x)
-            channel_outs[mag] = x
-
-        # Hierarchical magnification attention
-        hier_feats = self.hierarchical_attn(channel_outs)
         
-        # Convert dict → ordered list for fusion
-        features_list = [hier_feats[mag] for mag in self.magnifications]
-
-        # Cross-magnification fusion (now fully integrated)
-        fused = self.cross_mag_fusion(*features_list, mask=mask)
-        fused = self.dropout(fused)
-
-        # Classification head
+        # For multi-task learning (optional)
+        self.aux_classifier = None
+        
+    def _make_mag_branch(self, in_channels: int, out_channels: int, num_blocks: int) -> nn.Sequential:
+        """Create magnitude-specific processing branch"""
+        layers = []
+        
+        for i in range(num_blocks):
+            stride = 2 if i == 0 else 1  # Only first block downsamples
+            input_channels = in_channels if i == 0 else out_channels
+            
+            layers.append(
+                InvertedResidual(
+                    input_channels,
+                    out_channels,
+                    stride=stride,
+                    expand_ratio=6
+                )
+            )
+            
+        return nn.Sequential(*layers)
+    
+    def forward(
+        self, 
+        images_dict: Dict[str, torch.Tensor],
+        mask: Optional[torch.Tensor] = None,
+        return_features: bool = False
+    ) -> torch.Tensor:
+        """
+        Forward pass through the network.
+        
+        Args:
+            images_dict: Dictionary with keys 'mag_40', 'mag_100', 'mag_200', 'mag_400'
+            mask: Optional mask tensor (unused in lightweight model, for compatibility)
+            return_features: If True, also return intermediate features
+            
+        Returns:
+            logits: Classification logits [B, num_classes]
+            features: (optional) Dictionary of intermediate features
+        """
+        
+        # Extract shared shallow features
+        shared_features = {}
+        for mag in self.magnifications:
+            shared_features[mag] = self.shared_stem(images_dict[f'mag_{mag}'])
+        
+        # Process through magnitude-specific branches
+        mag_features = {}
+        spatial_sizes = {}
+        
+        for mag in self.magnifications:
+            # Magnitude-specific processing
+            feat = self.mag_branches[mag](shared_features[mag])
+            
+            # Store spatial size before pooling (for visualization)
+            spatial_sizes[mag] = feat.shape[-2:]
+            
+            # Apply attention
+            feat = self.mag_attention[mag](feat)
+            
+            # Global average pooling
+            feat = F.adaptive_avg_pool2d(feat, 1).flatten(1)
+            mag_features[mag] = feat
+        
+        # Cross-magnification fusion
+        fused = self.fusion(mag_features)
+        
+        # Classification
         logits = self.classifier(fused)
+        
+        if return_features:
+            features = {
+                'shared': shared_features,
+                'mag_specific': mag_features,
+                'fused': fused,
+                'spatial_sizes': spatial_sizes
+            }
+            return logits, features
+            
         return logits
-
-    def print_model_summary(self):
-        total = sum(p.numel() for p in self.parameters())
-        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"MMNet (feat_dim={self.feat_channels})")
-        print(f"Total params: {total:,}, Trainable: {trainable:,}")
-
-    def get_magnification_importance(self, dataloader=None, device="cuda"):
+    
+    @torch.no_grad()
+    def get_attention_maps(self, images_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Extract attention maps for visualization.
+        
+        Returns dictionary containing:
+        - channel_attention: Channel attention for each magnification
+        - spatial_attention: Spatial attention for each magnification  
+        - fusion_weights: Cross-magnification fusion weights
+        """
         self.eval()
-        if dataloader is None:  # fallback: static equal weights
-            with torch.no_grad():
-                raw_weights = torch.ones(len(self.magnifications))
-                return {mag: float((raw_weights / raw_weights.sum())[i].cpu()) for i, mag in enumerate(self.magnifications)}
+        
+        # Forward pass to populate attention maps
+        _ = self.forward(images_dict)
+        
+        attention_data = {
+            'channel_attention': {},
+            'spatial_attention': {},
+            'fusion_weights': None
+        }
+        
+        # Extract attention maps from each magnification
+        for mag in self.magnifications:
+            ca, sa = self.mag_attention[mag].get_attention_maps()
+            attention_data['channel_attention'][mag] = ca
+            attention_data['spatial_attention'][mag] = sa
+        
+        # Extract fusion weights
+        attention_data['fusion_weights'] = self.fusion.get_attention_weights()
+        
+        return attention_data
+    
+    def get_model_info(self) -> Dict[str, int]:
+        """Get model information including parameter counts"""
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        
+        # Count parameters by component
+        stem_params = sum(p.numel() for p in self.shared_stem.parameters())
+        branch_params = sum(p.numel() for p in self.mag_branches.parameters())
+        attention_params = sum(p.numel() for p in self.mag_attention.parameters())
+        fusion_params = sum(p.numel() for p in self.fusion.parameters())
+        classifier_params = sum(p.numel() for p in self.classifier.parameters())
+        
+        return {
+            'total_parameters': total_params,
+            'trainable_parameters': trainable_params,
+            'stem_parameters': stem_params,
+            'branch_parameters': branch_params,
+            'attention_parameters': attention_params,
+            'fusion_parameters': fusion_params,
+            'classifier_parameters': classifier_params
+        }
+    
+    def freeze_backbone(self):
+        """Freeze the shared stem and magnitude branches for fine-tuning"""
+        for param in self.shared_stem.parameters():
+            param.requires_grad = False
+        for param in self.mag_branches.parameters():
+            param.requires_grad = False
+            
+    def unfreeze_backbone(self):
+        """Unfreeze all parameters"""
+        for param in self.parameters():
+            param.requires_grad = True
 
-        all_weights = []
-        with torch.no_grad():
-            for images_dict, mask, _ in dataloader:
-                images = {k: v.to(device) for k, v in images_dict.items()}
-                mask = mask.to(device)
 
-                # Extract features for each magnification
-                feats = []
-                for i, mag in enumerate(self.magnifications):
-                    x = self.extractors[f'extractor_{mag}x'](images[f'mag_{mag}'])
-                    x = F.adaptive_avg_pool2d(x, 1).view(x.size(0), -1)  # flatten
-                    x = self.cross_mag_fusion.align_blocks[i](x)
-                    feats.append(x)
-                aligned_feats = torch.stack(feats, dim=1)  # [B, mags, C]
+# Compatibility with existing codebase
+def create_lightweight_model(num_classes=2, **kwargs):
+    """Factory function for creating the lightweight model"""
+    return MultiMagLightweightCNN(num_classes=num_classes, **kwargs)
 
-                # Get dynamic importance
-                raw_weights = self.cross_mag_fusion.mag_importance_mlp(aligned_feats)  # [B, mags, 1]
-                weights = F.softmax(raw_weights, dim=1)
-                if mask is not None:
-                    mask = mask.unsqueeze(-1)
-                    weights = weights * mask
-                    weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
 
-                all_weights.append(weights.squeeze(-1).cpu())
-
-        mean_weights = torch.cat(all_weights, dim=0).mean(dim=0)
-        return {mag: float(mean_weights[i]) for i, mag in enumerate(self.magnifications)}
+if __name__ == "__main__":
+    # Test the model
+    model = MultiMagLightweightCNN(num_classes=2, base_channels=24)
+    
+    # Print model info
+    info = model.get_model_info()
+    print("Model Information:")
+    for key, value in info.items():
+        print(f"  {key}: {value:,}")
+    
+    # Test forward pass
+    batch_size = 4
+    test_input = {
+        'mag_40': torch.randn(batch_size, 3, 224, 224),
+        'mag_100': torch.randn(batch_size, 3, 224, 224),
+        'mag_200': torch.randn(batch_size, 3, 224, 224),
+        'mag_400': torch.randn(batch_size, 3, 224, 224)
+    }
+    
+    # Normal forward
+    output = model(test_input)
+    print(f"\nOutput shape: {output.shape}")
+    
+    # Forward with features
+    output, features = model(test_input, return_features=True)
+    print(f"\nWith features - Output shape: {output.shape}")
+    print(f"Fused features shape: {features['fused'].shape}")
+    
+    # Get attention maps
+    attention_maps = model.get_attention_maps(test_input)
+    print(f"\nFusion weights shape: {attention_maps['fusion_weights'].shape}")

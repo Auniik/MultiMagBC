@@ -1,6 +1,6 @@
 from backbones.baseline import SimpleConcatBaseline
 from backbones.baseline import SimpleConcatBaseline
-from backbones.our.model import MMNet
+from backbones.our.model1 import MMNet
 from config import MAGNIFICATIONS
 
 def get_all_models(mags=MAGNIFICATIONS):

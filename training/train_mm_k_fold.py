@@ -132,9 +132,9 @@ def set_dropout_train_only(model):
             module.eval()
     
 
-def eval_model_with_threshold_optimization(model, dataloader, criterion, device, mc_dropout=True):
+def eval_model_with_threshold_optimization(model, dataloader, criterion, device, use_dropout=True):
     """Evaluate model with mixed precision (AMP) and safe threshold finding."""
-    if mc_dropout:
+    if use_dropout:
         model.train()
         set_dropout_train_only(model)
         torch.set_grad_enabled(False)
@@ -167,7 +167,7 @@ def eval_model_with_threshold_optimization(model, dataloader, criterion, device,
             all_probs.extend(probs.tolist())
             all_labels.extend(labels.cpu().numpy())
 
-    if mc_dropout:
+    if use_dropout:
         torch.set_grad_enabled(True)
 
     # Find optimal threshold (now safe)
