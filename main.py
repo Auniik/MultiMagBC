@@ -92,7 +92,8 @@ def main():
 
         samples_per_epoch = train_stats['total_samples_per_epoch']
         # Dynamic batch size adjustment for MAXIMUM utilization Ensure batch size doesn't exceed reasonable limits for stability
-        effective_batch_size = 256
+        # effective_batch_size = min(max(16, samples_per_epoch // 200), 32)
+        effective_batch_size=128
         print(f"Inner training samples: {samples_per_epoch}, batch size: {effective_batch_size}")
         
         sampler = train_ds.get_class_balanced_sampler()
@@ -126,12 +127,12 @@ def main():
         epochs = NUM_EPOCHS
         model = MMNet(dropout=DROPOUT_RATE).to(device)
         
-        # # Compile model for better GPU utilization (PyTorch 2.0+)
-        # try:
-        #     model = torch.compile(model, mode="reduce-overhead")
-        #     print("✅ Model compiled with torch.compile for optimization")
-        # except Exception as e:
-        #     print(f"⚠️ torch.compile not available: {e}")
+        # Compile model for better GPU utilization (PyTorch 2.0+)
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            print("✅ Model compiled with torch.compile for optimization")
+        except Exception as e:
+            print(f"⚠️ torch.compile not available: {e}")
         
         criterion = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, weight=class_weights, label_smoothing=LABEL_SMOOTHING)
         optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
