@@ -163,7 +163,7 @@ def train_lightweight_model():
         # Create validation dataset
         val_ds = MultiMagPatientDataset(
             patient_dict, val_pats, transform=eval_transform,
-            samples_per_patient=1, #adaptive_sampling=False
+            #samples_per_patient=1, #adaptive_sampling=False
         )
         val_loader = DataLoader(
             val_ds, batch_size=config['batch_size'],
@@ -173,7 +173,7 @@ def train_lightweight_model():
         # Update training dataset
         train_ds_inner = MultiMagPatientDataset(
             patient_dict, train_pats_inner, transform=train_transform,
-            samples_per_patient=2, #adaptive_sampling=True
+            #samples_per_patient=2, #adaptive_sampling=True
         )
         train_loader_inner = DataLoader(
             train_ds_inner, batch_size=config['batch_size'],
