@@ -73,6 +73,13 @@ def train_single_seed_model(fold_idx, train_pats, test_pats, patient_dict, confi
     # Merge configs (prioritize passed config)
     merged_config = {**full_config, **config}
     
+    # Debug: Verify batch_size is available
+    if 'batch_size' not in merged_config:
+        print(f"ERROR: batch_size missing from merged_config. Available keys: {list(merged_config.keys())}")
+        print(f"full_config keys: {list(full_config.keys())}")
+        print(f"passed config keys: {list(config.keys())}")
+        raise KeyError("batch_size not found in merged configuration")
+    
     # Create transforms
     train_transform, eval_transform, tta_transforms = create_transforms()
     
