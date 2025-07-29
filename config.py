@@ -162,9 +162,9 @@ def calculate_class_weights(train_labels):
     class_weights = []
     for class_id in sorted(label_counts.keys()):
         if class_id == 0:  # Benign class
-            weight = total_samples / (num_classes * label_counts[class_id]) * 1.5  # Increased
+            weight = total_samples / (num_classes * label_counts[class_id]) * 2.0  # More aggressive
         else:  # Malignant class
-            weight = total_samples / (num_classes * label_counts[class_id]) * 0.5  # Decreased
+            weight = total_samples / (num_classes * label_counts[class_id]) * 0.3  # More aggressive
         class_weights.append(weight)
     
     return torch.tensor(class_weights, dtype=torch.float32)

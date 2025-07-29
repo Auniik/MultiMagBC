@@ -14,10 +14,16 @@ class GradCAM:
         self.model.eval()
         self.activations.clear()
 
-        # Register hooks for scale3
+        # Register hooks - support both MMNet and lightweight models
         handles = []
         for mag in ['40', '100', '200', '400']:
-            layer = getattr(self.model.extractors[f'extractor_{mag}x'], 'conv_head')
+            # Check if this is lightweight model
+            if hasattr(self.model, 'mag_branches'):
+                # Lightweight model - hook to attention modules
+                layer = self.model.mag_attention[mag]
+            else:
+                # Original MMNet model
+                layer = getattr(self.model.extractors[f'extractor_{mag}x'], 'conv_head')
 
             def forward_hook(module, input, output, name=mag):
                 self.activations[name] = output

@@ -59,15 +59,33 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
     acc = accuracy_score(all_labels, all_preds)
     return np.mean(losses), acc
 
-def find_optimal_threshold(y_true, y_probs):
+def find_optimal_threshold(y_true, y_probs, optimize_for='accuracy'):
+    """Find optimal threshold optimizing for different metrics"""
     # Replace NaNs/Infs to avoid crash
     y_probs = np.nan_to_num(y_probs, nan=0.5, posinf=1.0, neginf=0.0)
-    precision, recall, thresholds = precision_recall_curve(y_true, y_probs)
-    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
-    best_idx = np.argmax(f1_scores)
-    # Clamp threshold range
-    best_thresh = thresholds[best_idx] if 0.3 <= thresholds[best_idx] <= 0.7 else 0.5
-    return best_thresh
+    
+    if optimize_for == 'accuracy':
+        # Optimize for overall accuracy
+        thresholds = np.linspace(0.1, 0.9, 100)
+        best_acc = 0
+        best_thresh = 0.5
+        
+        for thresh in thresholds:
+            preds = (y_probs >= thresh).astype(int)
+            acc = accuracy_score(y_true, preds)
+            if acc > best_acc:
+                best_acc = acc
+                best_thresh = thresh
+        
+        return best_thresh
+    
+    else:  # Default F1 optimization
+        precision, recall, thresholds = precision_recall_curve(y_true, y_probs)
+        f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
+        best_idx = np.argmax(f1_scores)
+        # Clamp threshold range
+        best_thresh = thresholds[best_idx] if 0.3 <= thresholds[best_idx] <= 0.7 else 0.5
+        return best_thresh
 
 def eval_model(model, dataloader, criterion, device, optimal_threshold=0.5):
     model.eval()
@@ -171,7 +189,7 @@ def eval_model_with_threshold_optimization(model, dataloader, criterion, device,
         torch.set_grad_enabled(True)
 
     # Find optimal threshold (now safe)
-    optimal_threshold = find_optimal_threshold(all_labels, all_probs)
+    optimal_threshold = find_optimal_threshold(all_labels, all_probs, optimize_for='accuracy')
     all_preds = (np.array(all_probs) >= optimal_threshold).astype(int)
 
     # Metrics

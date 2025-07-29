@@ -211,9 +211,10 @@ def main():
             torch.save(best_model_state, ckpt_path)
             print(f"✅ Best model saved: {ckpt_path} (Val BalAcc: {best_val_bal_acc:.3f})")
         
-        # Final test evaluation with optimized threshold (NO threshold optimization on test set)
-        metrics = eval_model(
-            model, test_loader, criterion, device, optimal_threshold
+        # Final test evaluation with TTA for best performance
+        from utils.tta import evaluate_with_tta 
+        metrics = evaluate_with_tta(
+            model, test_loader, device, optimal_threshold
         )
 
         print(f"⚡️ Test Results: Acc {metrics['accuracy']:.3f}, BalAcc {metrics['balanced_accuracy']:.3f}, F1 {metrics['f1_score']:.3f}, AUC {metrics['auc']:.3f}, Precision {metrics['precision']:.3f}, Recall {metrics['recall']:.3f} (threshold: {optimal_threshold:.3f})")
