@@ -94,7 +94,7 @@ def evaluate_with_tta(model, dataloader, device, optimal_threshold=0.5):
     Returns:
         Dictionary with evaluation metrics
     """
-    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, confusion_matrix
+    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, confusion_matrix, roc_curve
     import time
     
     model.eval()
@@ -128,6 +128,9 @@ def evaluate_with_tta(model, dataloader, device, optimal_threshold=0.5):
     auc = roc_auc_score(all_labels, all_probs)
     cm = confusion_matrix(all_labels, all_preds)
     
+    # ROC curve data for compatibility with main.py
+    fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
+    
     end_time = time.time()
     avg_inference_time = (end_time - start_time) / len(all_labels)
     
@@ -139,5 +142,8 @@ def evaluate_with_tta(model, dataloader, device, optimal_threshold=0.5):
         'recall': recall,
         'auc': auc,
         'confusion_matrix': cm,
-        'avg_inference_time': avg_inference_time
+        'avg_inference_time': avg_inference_time,
+        'fpr': fpr.tolist(),
+        'tpr': tpr.tolist(), 
+        'thresholds': thresholds.tolist()
     }
