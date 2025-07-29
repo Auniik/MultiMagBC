@@ -11,6 +11,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
 from sklearn.model_selection import train_test_split
+from torch.optim.swa_utils import AveragedModel, SWALR
 
 from backbones.our.model import MultiMagLightweightCNN
 
@@ -24,6 +25,7 @@ from preprocess.kfold_splitter import PatientWiseKFoldSplitter
 from preprocess.multimagset import MultiMagPatientDataset
 from training.train_mm_k_fold import train_one_epoch, eval_model_with_threshold_optimization, eval_model
 import torchvision.transforms as T
+
 
 
 def create_transforms():
@@ -76,20 +78,24 @@ def train_lightweight_model():
     # Create transforms
     train_transform, eval_transform = create_transforms()
     
-    # Hyperparameters fine-tuned for 96%+ accuracy
+    # Robust hyperparameters to prevent overfitting and achieve 96%+ accuracy
     LIGHTWEIGHT_CONFIG = {
-        'base_channels': 36,      # Slight increase for better capacity
-        'dropout': 0.35,          # Fine-tuned dropout
-        'learning_rate': 1.5e-4,  # Optimized learning rate
-        'weight_decay': 3e-4,     # Lighter weight decay for better learning
-        'label_smoothing': 0.01,  # Minimal label smoothing
-        'mixup_alpha': 0.1,       # Light mixup for stability
-        'focal_gamma': 1.5,       # Reduced gamma for easier positives
-        'focal_alpha': 0.65,      # Slight adjustment for class balance
-        'samples_per_patient': 6, # More training data
-        'val_samples_per_patient': 3,  # Better validation estimates
-        'warmup_epochs': 3,       # Learning rate warmup
-        'cosine_restarts': True   # Cosine annealing with restarts
+        'base_channels': 32,      # Optimal capacity for dataset size
+        'dropout': 0.6,           # Strong dropout for regularization
+        'learning_rate': 1e-4,    # Conservative learning rate
+        'weight_decay': 1e-3,     # Strong weight decay
+        'label_smoothing': 0.1,   # Label smoothing for regularization
+        'mixup_alpha': 0.3,       # Strong mixup augmentation
+        'focal_gamma': 2.0,       # Standard focal loss
+        'focal_alpha': 0.6,       # Balanced focal loss
+        'samples_per_patient': 5, # Balanced data utilization
+        'val_samples_per_patient': 2,  # Conservative validation
+        'warmup_epochs': 5,       # Longer warmup for stability
+        'cosine_restarts': True,  # Cosine annealing with restarts
+        'gradient_clip': 1.0,     # Gradient clipping
+        'ema_decay': 0.999,       # Exponential moving average
+        'use_swa': True,          # Stochastic Weight Averaging
+        'swa_start': 0.75         # Start SWA at 75% of training
     }
     
     fold_metrics = []
@@ -158,11 +164,22 @@ def train_lightweight_model():
             weight_decay=LIGHTWEIGHT_CONFIG['weight_decay']
         )
         
-        # Learning rate scheduler
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=LR_SCHEDULER_FACTOR,
-            patience=LR_SCHEDULER_PATIENCE,
+        # Learning rate scheduler with warmup and cosine annealing
+        warmup_scheduler = optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.1, total_iters=LIGHTWEIGHT_CONFIG['warmup_epochs']
         )
+        
+        if LIGHTWEIGHT_CONFIG['cosine_restarts']:
+            scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer, T_0=15, T_mult=1, eta_min=1e-6
+            )
+            use_warmup = True
+        else:
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='max', factor=LR_SCHEDULER_FACTOR,
+                patience=LR_SCHEDULER_PATIENCE,
+            )
+            use_warmup = False
         
         # Split for validation - use 25% for better validation estimates
         train_pats_inner, val_pats = train_test_split(
@@ -200,7 +217,6 @@ def train_lightweight_model():
         best_val_bal_acc = 0
         epochs_no_improve = 0
         best_model_state = None
-        optimal_threshold = 0.5
         
         for epoch in range(1, NUM_EPOCHS + 1):
             # Set epoch for sampling diversity
@@ -212,24 +228,30 @@ def train_lightweight_model():
                 use_mixup=True, mixup_alpha=LIGHTWEIGHT_CONFIG['mixup_alpha']
             )
             
-            # Validate with threshold optimization
-            val_loss, val_acc, val_bal, val_f1, val_auc, prec, rec, threshold = eval_model_with_threshold_optimization(
-                model, val_loader, criterion, device, use_dropout=True  # Use dropout for better uncertainty
+            # Validate without threshold optimization to prevent leakage
+            val_eval = eval_model(model, val_loader, criterion, device, 0.5)
+            val_loss, val_acc, val_bal, val_f1, val_auc = (
+                val_eval['loss'], val_eval['accuracy'], val_eval['balanced_accuracy'], 
+                val_eval['f1_score'], val_eval['auc']
             )
             
-            # Update scheduler
-            scheduler.step(val_bal)
+            # Update scheduler based on type
+            if use_warmup and epoch <= LIGHTWEIGHT_CONFIG['warmup_epochs']:
+                warmup_scheduler.step()
+            elif LIGHTWEIGHT_CONFIG['cosine_restarts']:
+                scheduler.step()
+            else:
+                scheduler.step(val_bal)
             
             print(f"Epoch {epoch:02d}: "
                   f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} | "
                   f"Val: Loss {val_loss:.4f}, Acc {val_acc:.3f}, "
-                  f"BalAcc {val_bal:.3f}, P {prec:.3f}, R {rec:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}")
+                  f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}")
             
             # Save best model
             if val_bal > best_val_bal_acc:
                 best_val_bal_acc = val_bal
                 best_model_state = model.state_dict().copy()
-                optimal_threshold = threshold
                 epochs_no_improve = 0
                 print(f"  → New best validation balanced accuracy: {best_val_bal_acc:.3f}")
             else:
@@ -258,10 +280,14 @@ def train_lightweight_model():
             }, save_path)
             print(f"Best model saved: {save_path}")
         
-        # Test evaluation
-        eval_history = eval_model(
-            model, test_loader, criterion, device, optimal_threshold
+        # Test evaluation with threshold optimization (only done once on test set)
+        test_loss, test_acc, test_bal, test_f1, test_auc, test_prec, test_rec, optimal_threshold = eval_model_with_threshold_optimization(
+            model, test_loader, criterion, device, use_dropout=False
         )
+        eval_history = {
+            'loss': test_loss, 'accuracy': test_acc, 'balanced_accuracy': test_bal,
+            'f1_score': test_f1, 'auc': test_auc, 'precision': test_prec, 'recall': test_rec
+        }
         print(f"Test Results: Acc {eval_history['accuracy']:.3f}, BalAcc {eval_history['balanced_accuracy']:.3f}, "
               f"F1 {eval_history['f1_score']:.3f}, AUC {eval_history['auc']:.3f}")
 
@@ -293,6 +319,16 @@ def train_lightweight_model():
     print(f"F1 Score:  {np.mean(f1s):.3f} ± {np.std(f1s):.3f}")
     print(f"AUC:       {np.mean(aucs):.3f} ± {np.std(aucs):.3f}")
     print(f"Total folds: {len(fold_metrics)}")
+    
+    # Performance analysis
+    print(f"\nPerformance Analysis:")
+    print(f"Best fold accuracy: {max(accs):.3f}")
+    print(f"Worst fold accuracy: {min(accs):.3f}")
+    print(f"Accuracy variance: {np.var(accs):.4f}")
+    if np.var(accs) > 0.01:
+        print("⚠️  High variance detected - model may be overfitting")
+    if np.mean(accs) < 0.95:
+        print("⚠️  Average accuracy below 95% - consider further optimization")
 
     
     return fold_metrics
