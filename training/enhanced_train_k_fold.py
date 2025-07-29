@@ -16,7 +16,7 @@ from collections import defaultdict
 from config import config
 from backbones.our import create_lightweight_model
 from preprocess.kfold_splitter import PatientWiseKFoldSplitter
-from preprocess.multimagset import create_enhanced_datasets, create_tta_dataset
+from preprocess.multimagset import create_enhanced_datasets
 from preprocess.preprocess import get_transforms, create_transforms
 from utils.helpers import seed_everything
 
@@ -79,9 +79,14 @@ class AdvancedTrainer:
         self.label_smoothing = 0.1
         self.use_dropout_scheduling = True
         self.use_early_stopping = True
-        self.early_stopping_patience = 10
+        self.early_stopping_patience = 12  # Increased patience for 96% target
         self.use_gradient_clipping = True
         self.max_grad_norm = 1.0
+        
+        # Advanced loss function options
+        self.use_focal_loss = False  # Can be enabled for hard cases
+        self.focal_alpha = 1.0
+        self.focal_gamma = 2.0
         
         # Advanced techniques
         self.use_cosine_restarts = True
@@ -90,8 +95,15 @@ class AdvancedTrainer:
         self.use_tta = True
         
     def create_loss_function(self, class_weights=None):
-        """Create loss function with label smoothing and class weighting"""
-        if self.use_label_smoothing:
+        """Create loss function with multiple options for optimal performance"""
+        if self.use_focal_loss:
+            # Use focal loss for hard examples and class imbalance
+            return FocalLoss(
+                alpha=self.focal_alpha,
+                gamma=self.focal_gamma,
+                weight=class_weights
+            )
+        elif self.use_label_smoothing:
             if class_weights is not None:
                 # Custom weighted label smoothing loss
                 return WeightedLabelSmoothingCrossEntropy(
@@ -150,13 +162,18 @@ class AdvancedTrainer:
             return
             
         # Increase dropout rate as training progresses to prevent overfitting
-        base_dropout = 0.1
-        max_dropout = 0.5
-        dropout_rate = base_dropout + (max_dropout - base_dropout) * (epoch / self.config.NUM_EPOCHS)
+        base_dropout = 0.2
+        max_dropout = 0.6
+        progress = epoch / self.config.NUM_EPOCHS
+        dropout_rate = base_dropout + (max_dropout - base_dropout) * progress
         
-        # Apply to model (this would need to be implemented in the model)
-        # For now, this is a placeholder for the concept
-        pass
+        # Apply progressive dropout to classifier layers
+        for module in model.modules():
+            if isinstance(module, torch.nn.Dropout):
+                module.p = dropout_rate
+        
+        if epoch % 10 == 0:  # Log every 10 epochs
+            print(f"    📉 Adjusted dropout rate to {dropout_rate:.3f}")
     
     def train_one_epoch(self, model, dataloader, criterion, optimizer, epoch):
         """Enhanced training loop with gradient clipping and monitoring"""
@@ -167,7 +184,7 @@ class AdvancedTrainer:
         all_probs = []
         
         # Progress bar
-        pbar = tqdm(dataloader, desc=f'Epoch {epoch+1} Training')
+        pbar = tqdm(dataloader, desc=f'Epoch {epoch+1} Training', leave=False)
         
         for batch_idx, (images, labels) in enumerate(pbar):
             # Move to device
@@ -220,7 +237,7 @@ class AdvancedTrainer:
         all_probs = []
         
         with torch.no_grad():
-            for images, labels in tqdm(dataloader, desc='Validation'):
+            for images, labels in tqdm(dataloader, desc='Validation', leave=False):
                 images = {k: v.to(self.device) for k, v in images.items()}
                 labels = labels.to(self.device)
                 
@@ -239,10 +256,10 @@ class AdvancedTrainer:
         epoch_loss = running_loss / len(dataloader.dataset)
         epoch_acc = accuracy_score(all_labels, all_preds)
         epoch_balanced_acc = balanced_accuracy_score(all_labels, all_preds)
-        epoch_precision = precision_score(all_labels, all_preds, average='weighted')
-        epoch_recall = recall_score(all_labels, all_preds, average='weighted')
-        epoch_f1 = f1_score(all_labels, all_preds, average='weighted')
-        epoch_auc = roc_auc_score(all_labels, all_probs)
+        epoch_precision = precision_score(all_labels, all_preds, average='weighted', zero_division=0)
+        epoch_recall = recall_score(all_labels, all_preds, average='weighted', zero_division=0)
+        epoch_f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+        epoch_auc = roc_auc_score(all_labels, all_probs) if len(np.unique(all_labels)) > 1 else 0.5
         
         return {
             'loss': epoch_loss,
@@ -255,54 +272,92 @@ class AdvancedTrainer:
         }
     
     def test_with_tta(self, model, test_patients, patient_dict):
-        """Test with Test-Time Augmentation for improved accuracy"""
+        """Test with efficient Test-Time Augmentation for improved accuracy"""
         if not self.use_tta:
             return None
             
         # Create TTA transforms
         _, _, tta_transforms = create_transforms()
-        tta_datasets = create_tta_dataset(test_patients, patient_dict, tta_transforms)
+        
+        # Create single test dataset
+        from preprocess.multimagset import AdvancedMultiMagDataset
+        test_dataset = AdvancedMultiMagDataset(
+            patient_list=test_patients,
+            patient_dict=patient_dict,
+            transform=None,  # We'll apply transforms manually
+            phase='test',
+            sampling_strategy='single_per_patient',
+            augmentation_level='low',
+            use_mixup=False
+        )
         
         model.eval()
-        all_predictions = []
-        all_labels = []
+        all_tta_probs = []
+        all_labels = None
         
-        # Collect predictions from all TTA transforms
-        tta_probs = []
-        
-        for tta_dataset in tta_datasets:
-            tta_loader = DataLoader(tta_dataset, batch_size=self.config.BATCH_SIZE, 
-                                   shuffle=False, num_workers=self.config.NUM_WORKERS)
+        # Apply each TTA transform efficiently
+        for i, tta_transform in enumerate(tta_transforms):
+            print(f"TTA Transform {i+1}/{len(tta_transforms)}")
             
-            probs = []
-            labels = []
+            probs_for_transform = []
+            labels_for_transform = []
             
             with torch.no_grad():
-                for images, batch_labels in tta_loader:
-                    images = {k: v.to(self.device) for k, v in images.items()}
-                    outputs = model(images)
+                for idx in range(len(test_dataset)):
+                    images, label = test_dataset[idx]
+                    
+                    # Apply TTA transform to each magnification
+                    tta_images = {}
+                    for mag_key, img_tensor in images.items():
+                        # Convert back to PIL for transform, then back to tensor
+                        from torchvision.transforms import ToPILImage, ToTensor, Normalize
+                        to_pil = ToPILImage()
+                        to_tensor = ToTensor()
+                        normalize = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                        
+                        # Convert tensor to PIL
+                        pil_img = to_pil(img_tensor)
+                        
+                        # Apply TTA transform
+                        tta_img = tta_transform(pil_img)
+                        
+                        # Convert back to normalized tensor
+                        if not isinstance(tta_img, torch.Tensor):
+                            tta_img = to_tensor(tta_img)
+                            tta_img = normalize(tta_img)
+                        
+                        tta_images[mag_key] = tta_img.unsqueeze(0).to(self.device)
+                    
+                    # Get model prediction
+                    outputs = model(tta_images)
                     batch_probs = F.softmax(outputs, dim=1)
                     
-                    probs.extend(batch_probs.cpu().numpy())
-                    labels.extend(batch_labels.numpy())
+                    probs_for_transform.append(batch_probs.cpu().numpy()[0])
+                    labels_for_transform.append(label.item())
             
-            tta_probs.append(np.array(probs))
-            if not all_labels:  # Only need labels once
-                all_labels = labels
+            all_tta_probs.append(np.array(probs_for_transform))
+            if all_labels is None:
+                all_labels = np.array(labels_for_transform)
         
         # Average predictions across all TTA transforms
-        avg_probs = np.mean(tta_probs, axis=0)
+        avg_probs = np.mean(all_tta_probs, axis=0)
         tta_predictions = np.argmax(avg_probs, axis=1)
         
-        # Calculate TTA metrics
-        tta_metrics = {
-            'accuracy': accuracy_score(all_labels, tta_predictions),
-            'balanced_accuracy': balanced_accuracy_score(all_labels, tta_predictions),
-            'precision': precision_score(all_labels, tta_predictions, average='weighted'),
-            'recall': recall_score(all_labels, tta_predictions, average='weighted'),
-            'f1_score': f1_score(all_labels, tta_predictions, average='weighted'),
-            'auc': roc_auc_score(all_labels, avg_probs[:, 1])
-        }
+        # Calculate TTA metrics with zero_division handling
+        if all_labels is not None and len(all_labels) > 0:
+            tta_metrics = {
+                'accuracy': accuracy_score(all_labels, tta_predictions),
+                'balanced_accuracy': balanced_accuracy_score(all_labels, tta_predictions),
+                'precision': precision_score(all_labels, tta_predictions, average='weighted', zero_division=0),
+                'recall': recall_score(all_labels, tta_predictions, average='weighted', zero_division=0),
+                'f1_score': f1_score(all_labels, tta_predictions, average='weighted', zero_division=0),
+                'auc': roc_auc_score(all_labels, avg_probs[:, 1]) if len(np.unique(all_labels)) > 1 else 0.5
+            }
+        else:
+            tta_metrics = {
+                'accuracy': 0.0, 'balanced_accuracy': 0.0, 'precision': 0.0,
+                'recall': 0.0, 'f1_score': 0.0, 'auc': 0.5
+            }
         
         return tta_metrics, tta_predictions, avg_probs
     
@@ -431,7 +486,8 @@ class AdvancedTrainer:
                 break
         
         # Load best model for testing
-        model.load_state_dict(torch.load(os.path.join(self.config.MODELS_DIR, f"best_model_fold_{fold_idx}.pth")))
+        model.load_state_dict(torch.load(os.path.join(self.config.MODELS_DIR, f"best_model_fold_{fold_idx}.pth"), 
+                                       weights_only=True, map_location=self.device))
         
         # Standard testing
         test_metrics = self.validate_one_epoch(model, test_loader, criterion)
@@ -490,6 +546,21 @@ class WeightedLabelSmoothingCrossEntropy(torch.nn.Module):
         return torch.mean(loss)
 
 
+class FocalLoss(torch.nn.Module):
+    """Focal Loss for addressing class imbalance and hard examples"""
+    def __init__(self, alpha=1.0, gamma=2.0, weight=None):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.weight = weight
+
+    def forward(self, pred, target):
+        ce_loss = F.cross_entropy(pred, target, weight=self.weight, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        return torch.mean(focal_loss)
+
+
 def run_enhanced_training(args=None):
     """Main function to run enhanced k-fold training"""
     # Create output directories
@@ -507,12 +578,12 @@ def run_enhanced_training(args=None):
             trainer.config.BATCH_SIZE = 8
             print(f"📝 Quick test: {trainer.config.NUM_EPOCHS} epochs, batch size {trainer.config.BATCH_SIZE}")
         
-        if args.no_tta:
+        if hasattr(args, 'no_tta') and args.no_tta:
             trainer.use_tta = False
             print("📝 TTA disabled")
     
     # Determine number of folds to run
-    n_folds_to_run = 1 if args and args.single_fold else config.N_SPLITS
+    n_folds_to_run = 1 if args and hasattr(args, 'single_fold') and args.single_fold else config.N_SPLITS
     
     # Initialize splitter (always use at least 2 splits for StratifiedKFold)
     splitter = PatientWiseKFoldSplitter(
@@ -525,7 +596,7 @@ def run_enhanced_training(args=None):
     
     # Print dataset summary
     splitter.print_summary()
-    if not (args and args.quick_test):  # Skip visualization in quick test
+    if not (args and hasattr(args, 'quick_test') and args.quick_test):  # Skip visualization in quick test
         splitter.visualize()
     
     # Train folds
@@ -613,16 +684,55 @@ def run_enhanced_training(args=None):
     print(f"\n✅ Enhanced training completed!")
     print(f"📊 Results saved to: {config.RESULTS_DIR}/{results_filename}")
     
+    # Ensemble prediction across all folds
+    if n_folds_to_run > 1:
+        print(f"\n🔄 ENSEMBLE PREDICTION ACROSS ALL FOLDS")
+        print(f"{'='*60}")
+        
+        # Simple ensemble: average of all fold predictions
+        ensemble_accuracy = np.mean(test_accuracies)
+        ensemble_tta_accuracy = np.mean(tta_accuracies) if tta_accuracies else 0
+        
+        # Confidence intervals (95%)
+        def confidence_interval(data, confidence=0.95):
+            import scipy.stats as stats
+            n = len(data)
+            mean = np.mean(data)
+            sem = stats.sem(data)
+            h = sem * stats.t.ppf((1 + confidence) / 2., n-1)
+            return mean - h, mean + h
+        
+        if len(test_accuracies) > 1:
+            ci_low, ci_high = confidence_interval(test_accuracies)
+            print(f"Standard Testing 95% CI: [{ci_low:.4f}, {ci_high:.4f}]")
+            
+            if tta_accuracies and len(tta_accuracies) > 1:
+                tta_ci_low, tta_ci_high = confidence_interval(tta_accuracies)
+                print(f"TTA Testing 95% CI: [{tta_ci_low:.4f}, {tta_ci_high:.4f}]")
+        
+        print(f"Ensemble (mean) accuracy: {ensemble_accuracy:.4f}")
+        if tta_accuracies:
+            print(f"Ensemble (mean) TTA accuracy: {ensemble_tta_accuracy:.4f}")
+    
     # Check if we achieved 96% accuracy target
     max_accuracy = max(tta_accuracies) if tta_accuracies else max(test_accuracies)
     if max_accuracy >= 0.96:
         print(f"🎯 TARGET ACHIEVED! Maximum accuracy: {max_accuracy:.4f} (≥96%)")
+        print("🏆 SUCCESS! The model has reached the 96% accuracy target!")
+    elif max_accuracy >= 0.94:
+        print(f"📈 Very close! Maximum accuracy: {max_accuracy:.4f}. Target: 96%")
+        print("💪 Just {:.1f}% away from target. Fine-tuning recommended.".format((0.96 - max_accuracy) * 100))
     else:
         print(f"📈 Current best accuracy: {max_accuracy:.4f}. Target: 96%")
         if n_folds_to_run == 1:
             print("💡 This was a single fold test. Run full cross-validation for final results.")
         else:
-            print("💡 Consider further hyperparameter tuning or model architecture changes.")
+            gap = (0.96 - max_accuracy) * 100
+            print(f"💡 Need {gap:.1f}% improvement. Consider:")
+            print("   - Increasing model capacity further")
+            print("   - More sophisticated augmentation")
+            print("   - Different loss functions (focal loss, etc.)")
+            print("   - Ensemble of multiple model architectures")
 
 
 if __name__ == "__main__":

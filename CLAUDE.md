@@ -39,7 +39,19 @@ pip install -r requirements.txt  # or requirements.runpod for RunPod
 
 ### Training Commands
 
-**Enhanced Training (Recommended for 96% accuracy):**
+**Optimized Training (Best for 96% accuracy target):**
+```bash
+# Fully optimized training with all improvements
+python main_optimized_96.py
+
+# With focal loss for hard examples
+python main_optimized_96.py --focal-loss
+
+# Quick test run
+python main_optimized_96.py --quick-test
+```
+
+**Enhanced Training (Alternative):**
 ```bash
 # Full enhanced training with all optimizations
 python main_enhanced.py
