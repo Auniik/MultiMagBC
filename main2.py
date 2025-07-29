@@ -104,7 +104,7 @@ def create_transforms():
         T.Compose([T.Resize((224, 224)), T.RandomHorizontalFlip(p=1.0), T.ToTensor(), T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]),
         T.Compose([T.Resize((224, 224)), T.RandomVerticalFlip(p=1.0), T.ToTensor(), T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]),
         T.Compose([T.Resize((224, 224)), T.RandomRotation(degrees=5), T.ToTensor(), T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]),
-        T.Compose([T.Resize((224, 224)), T.RandomRotation(degrees=-5), T.ToTensor(), T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]),
+        T.Compose([T.Resize((224, 224)), T.RandomRotation(degrees=(-5, 5)), T.ToTensor(), T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]),
         T.Compose([T.Resize((224, 224)), T.ColorJitter(brightness=0.1), T.ToTensor(), T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]),
         T.Compose([T.Resize((224, 224)), T.ColorJitter(contrast=0.1), T.ToTensor(), T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]),
         T.Compose([T.Resize((224, 224)), T.RandomAffine(degrees=0, translate=(0.05, 0.05)), T.ToTensor(), T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]),
