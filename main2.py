@@ -287,6 +287,7 @@ def train_lightweight_model():
         best_val_bal_acc = 0
         epochs_no_improve = 0
         best_model_state = None
+        optimal_threshold = 0.5  # Initialize threshold
         
         for epoch in range(1, NUM_EPOCHS + 1):
             # Set epoch for sampling diversity
