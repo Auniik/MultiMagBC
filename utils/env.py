@@ -1,5 +1,9 @@
 import os
 
+def get_project_root():
+    """Returns the absolute path to the project root."""
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
 
 def is_runpod():
     return (
@@ -21,5 +25,3 @@ def get_base_path():
         return "/kaggle/input"
     else:
         return "./data"
-   
-        return "./data/breakhis/BreaKHis_v1/BreaKHis_v1/histology_slides/breast"

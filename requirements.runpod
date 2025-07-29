@@ -38,3 +38,4 @@ safetensors>=0.3.0
 tabulate
 filelock
 fsspec
+albumentations

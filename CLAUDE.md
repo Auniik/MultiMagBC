@@ -4,72 +4,88 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a PyTorch-based deep learning project for breast cancer classification using multi-magnification histopathology images from the BreakHis dataset. The project implements MMNet (Multi-Magnification Network) with attention mechanisms to process images at different magnifications (40X, 100X, 200X, 400X) simultaneously.
+This is a multi-magnification histopathology image classification project focused on breast cancer detection using the BreakHis dataset. The project implements a lightweight CNN architecture (`MultiMagLightweightCNN`) that processes images at four different magnifications (40x, 100x, 200x, 400x) simultaneously for binary classification (benign vs malignant).
 
-## Common Commands
+## Key Architecture Components
 
-### Setup and Environment
+### Model Architecture (`backbones/our.py`)
+- **MultiMagLightweightCNN**: Main model with ~200-500K parameters (vs 5M+ for EfficientNet-based models)
+- **InvertedResidual**: MobileNetV2-style building blocks with depthwise separable convolutions
+- **ChannelSpatialAttention**: Lightweight attention combining channel and spatial attention
+- **CrossMagFusionLight**: Cross-magnification fusion with learnable attention weights
+- Shared shallow features across magnifications with magnitude-specific deep processing
+
+### Data Pipeline
+- **MultiMagDataset** (`preprocess/multimagset.py`): Handles multi-magnification image loading
+- **PatientWiseKFoldSplitter** (`preprocess/kfold_splitter.py`): Ensures patient-wise splits to prevent data leakage
+- **Data Structure**: `dataset_dir/[benign|malignant]/hospital/subtype/patient_id/magnification/images`
+
+### Training Framework (`training/train_k_fold.py`)
+- K-fold cross-validation with patient-wise splitting
+- Weighted loss for class imbalance handling
+- AdamW optimizer with CosineAnnealingLR scheduler
+- Comprehensive metrics tracking (accuracy, balanced accuracy, precision, recall, F1)
+
+## Common Development Commands
+
+### Environment Setup
 ```bash
-# Setup environment (for RunPod/cloud environments)
+# For RunPod environment
 bash setup.sh
 
 # Install dependencies
-pip install -r requirements.txt
+pip install -r requirements.txt  # or requirements.runpod for RunPod
 ```
 
-### Training and Evaluation
+### Training Commands
+
+**Enhanced Training (Recommended for 96% accuracy):**
 ```bash
-# Run full training pipeline with k-fold cross-validation
+# Full enhanced training with all optimizations
+python main_enhanced.py
+
+# Quick test run (reduced epochs)
+python main_enhanced.py --quick-test
+
+# Single fold test
+python main_enhanced.py --single-fold
+
+# Without test-time augmentation
+python main_enhanced.py --no-tta
+```
+
+**Standard Training:**
+```bash
+# Original training script
 python main.py
 
-# Run evaluation and generate visualizations
-python eval.py
+# Direct training call  
+python training/train_k_fold.py
 
-# Generate specific analysis
-python eval.py --learning-curves
-python eval.py --roc-curves
-python eval.py --table
-python eval.py --magnitude
+# Enhanced training directly
+python training/enhanced_train_k_fold.py
 ```
 
-## Code Architecture
+### Configuration
+All hyperparameters are centralized in `config.py`:
+- Model: `MODEL_NAME`, `BASE_CHANNELS`, `DROPOUT`
+- Training: `BATCH_SIZE`, `NUM_EPOCHS`, `LEARNING_RATE`
+- Data: `MAGNIFICATIONS`, `IMAGE_SIZE`, `N_SPLITS`
+- Paths: `DATASET_DIR`, `OUTPUT_DIR`, `LOGS_DIR`, `MODELS_DIR`, `RESULTS_DIR`
 
-### Core Components
+### Evaluation and Visualization
+- **GradCAM**: `evaluate/gradcam.py` for attention visualization
+- **Output Structure**: 
+  - `output/models/`: Best model checkpoints per fold
+  - `output/logs/`: Training logs per fold  
+  - `output/results/`: Test metrics and predictions per fold
+  - `output/plots/`: Visualizations and analysis plots
 
-1. **Model Architecture** (`backbones/our/model.py`):
-   - `MMNet`: Main multi-magnification network with attention mechanisms
-   - `HybridCrossMagFusion`: Cross-magnification fusion with attention
-   - `MultiScaleAttentionPool`: Spatial attention pooling
+## Dataset Structure
 
-2. **Data Pipeline** (`preprocess/`):
-   - `MultiMagPatientDataset`: Handles multi-magnification patient data with sampling strategies
-   - `PatientWiseKFoldSplitter`: Patient-wise k-fold splitting to prevent data leakage
-   - `multimagset.py`: Core dataset implementation with balanced sampling
-
-3. **Training Pipeline** (`training/`):
-   - `train_mm_k_fold.py`: Training functions with mixup, threshold optimization
-   - `train_single_mag.py`: Single magnification baseline training
-   - `ensemble_utils.py`: Ensemble methods for multiple models
-
-4. **Configuration** (`config.py`):
-   - Centralized configuration including hyperparameters, loss functions, data paths
-   - Custom `FocalLoss` implementation for class imbalance
-   - Training configuration based on device capabilities
-
-### Key Features
-
-- **Multi-magnification Processing**: Processes 4 different magnifications simultaneously
-- **Patient-wise Cross-validation**: Ensures no patient data leakage between folds
-- **Attention Mechanisms**: Hierarchical magnification attention and cross-magnification fusion
-- **Class Balancing**: Handles imbalanced dataset with focal loss and weighted sampling
-- **Mixed Precision Training**: Uses AMP for faster training and lower memory usage
-- **Threshold Optimization**: Automatically finds optimal classification threshold per fold
-
-### Data Structure
-
-The project expects the BreakHis dataset structure:
+The project expects the BreakHis dataset in this structure:
 ```
-[data/workspace]/breakhis/BreaKHis_v1/BreaKHis_v1/histology_slides/breast/
+data/breakhis/BreaKHis_v1/BreaKHis_v1/histology_slides/breast/
 ├── benign/
 │   └── SOB/
 │       ├── adenosis/
@@ -84,33 +100,73 @@ The project expects the BreakHis dataset structure:
         └── papillary_carcinoma/
 ```
 
-Each patient folder contains subfolders for different magnifications (40X, 100X, 200X, 400X).
+Each patient directory contains subdirectories for different magnifications (40X, 100X, 200X, 400X).
 
-### Output Structure
+## Enhanced Features for 96% Accuracy
 
-Results are saved to `output/` directory:
-- `models/`: Best model checkpoints per fold
-- `results/`: JSON results per fold and CSV summaries
-- `plots/`: Training curves and analysis plots
-- `gradcam/`: GradCAM visualizations for model interpretability
+### Advanced Dataset Utilization (`preprocess/multimagset.py`)
+- **AdvancedMultiMagDataset**: Uses all available images per patient instead of random sampling
+- **Multiple sampling strategies**: `all_images`, `balanced_per_patient`, `single_per_patient`
+- **Sophisticated augmentation**: Histopathology-specific transforms with 3 levels (low/medium/high)
+- **Mixup augmentation**: Data mixing for better generalization
+- **Smart fallback**: Handles missing magnifications gracefully
 
-### Important Implementation Details
+### Anti-Overfitting Training Pipeline (`training/enhanced_train_k_fold.py`)
+- **Label smoothing**: Prevents overconfident predictions (smoothing=0.1)
+- **Early stopping**: Patience-based with best weight restoration
+- **Learning rate scheduling**: Cosine annealing with warm restarts
+- **Gradient clipping**: Prevents gradient explosion (max_norm=1.0)
+- **Weight decay**: L2 regularization (0.01)
+- **Progressive dropout**: Dynamically adjusts dropout during training
 
-- **Patient-wise Splitting**: Uses patient IDs to ensure no data leakage between train/val/test
-- **Dynamic Sampling**: Training uses adaptive sampling based on available images per patient
-- **Magnification Masking**: Handles missing magnifications with zero tensors and attention masks
-- **Threshold Optimization**: Uses precision-recall curve to find optimal threshold per fold
-- **Early Stopping**: Monitors validation balanced accuracy with configurable patience
+### Test-Time Augmentation (TTA)
+- **Multi-transform ensemble**: Averages predictions across 13 different augmentations
+- **Flip/rotation combinations**: Geometric invariance
+- **Color/brightness variations**: Robustness to staining variations
+- **Multi-crop testing**: Spatial robustness
 
-### Environment Variables and Paths
+### Comprehensive Monitoring
+- **Real-time progress bars**: Training and validation progress with tqdm
+- **Advanced metrics**: Accuracy, balanced accuracy, precision, recall, F1, AUC
+- **Learning rate tracking**: Monitor LR schedule effectiveness
+- **Training history**: Complete logs saved per fold
+- **Visualization ready**: All metrics structured for plotting
 
-The project uses `utils/env.py` to handle different environments (local vs runpod environment). The base path for data is automatically detected.
+## Important Implementation Details
 
-### Key Hyperparameters (config.py)
+### Environment Detection
+- `utils/env.py`: Handles RunPod vs local environment detection
+- Automatically adjusts paths and worker counts based on environment
 
-- Image size: 224x224
-- Batch size: Automatically adjusted based on device (16 for CUDA, 8 for MPS, 4 for CPU)
-- Learning rate: 1e-4 with ReduceLROnPlateau scheduler
-- Early stopping patience: 7 epochs
-- Dropout rate: 0.75 for regularization
-- Focal loss: α=0.5, γ=3.0 for class imbalance
+### Model Features
+- Input format: Dictionary with keys `{'mag_40', 'mag_100', 'mag_200', 'mag_400'}`
+- Supports attention map extraction for visualization
+- Built-in model info reporting for parameter counting
+- Optional feature extraction mode with `return_features=True`
+
+### Training Features
+- Patient-wise K-fold splitting prevents data leakage
+- Weighted loss for handling class imbalance
+- Best model selection based on validation balanced accuracy
+- Comprehensive metrics logging and visualization
+
+### Key Dependencies
+- PyTorch/TorchVision for deep learning
+- scikit-learn for metrics and splitting
+- tqdm for progress bars
+- numpy for numerical operations
+- PIL for image processing
+- matplotlib/seaborn for visualization (optional)
+
+## Testing and Validation
+- K-fold cross-validation with patient-wise splitting
+- Enhanced validation with comprehensive metrics
+- Test-time augmentation for maximum performance
+- Model evaluation: accuracy, balanced accuracy, precision, recall, F1-score, AUC
+
+## Performance Optimization Tips
+1. **Use enhanced training**: `python main_enhanced.py` for best results
+2. **Monitor validation**: Watch for overfitting with early stopping
+3. **TTA for final test**: Always use test-time augmentation for best accuracy
+4. **Batch size tuning**: Reduce if memory issues, increase if underutilizing GPU
+5. **Learning rate**: Start with 2e-4, adjust based on convergence patterns

@@ -6,7 +6,6 @@ import json
 from datetime import datetime
 import numpy as np
 import torch
-from config import OUTPUT_DIR
 
 def seed_everything(seed=42):
     random.seed(seed)
