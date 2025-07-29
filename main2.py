@@ -76,18 +76,20 @@ def train_lightweight_model():
     # Create transforms
     train_transform, eval_transform = create_transforms()
     
-    # Hyperparameters optimized for better performance
+    # Hyperparameters fine-tuned for 96%+ accuracy
     LIGHTWEIGHT_CONFIG = {
-        'base_channels': 48,  # Increased capacity for better performance
-        'dropout': 0.6,       # Higher dropout for better regularization
-        'learning_rate': 1e-4,  # Optimal learning rate
-        'weight_decay': 1e-3,   # Stronger weight decay
-        'label_smoothing': 0.05,  # Reduced label smoothing
-        'mixup_alpha': 0.2,      # Standard mixup augmentation
-        'focal_gamma': 2.0,
-        'focal_alpha': 0.6,      # Balanced focal loss
-        'samples_per_patient': 5,  # More samples per patient
-        'val_samples_per_patient': 2
+        'base_channels': 36,      # Slight increase for better capacity
+        'dropout': 0.35,          # Fine-tuned dropout
+        'learning_rate': 1.5e-4,  # Optimized learning rate
+        'weight_decay': 3e-4,     # Lighter weight decay for better learning
+        'label_smoothing': 0.01,  # Minimal label smoothing
+        'mixup_alpha': 0.1,       # Light mixup for stability
+        'focal_gamma': 1.5,       # Reduced gamma for easier positives
+        'focal_alpha': 0.65,      # Slight adjustment for class balance
+        'samples_per_patient': 6, # More training data
+        'val_samples_per_patient': 3,  # Better validation estimates
+        'warmup_epochs': 3,       # Learning rate warmup
+        'cosine_restarts': True   # Cosine annealing with restarts
     }
     
     fold_metrics = []
