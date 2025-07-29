@@ -47,10 +47,9 @@ def test_single_fold_60_20_20():
     model = MultiMagLightweightCNN(num_classes=2, dropout=0.4).to(device)
     
     train_labels = [train_ds.patient_dict[pid]['label'] for pid in train_pats]
-    class_weights = calculate_class_weights(train_labels).to(device)
-    print(f"⚖️ Class weights: Benign={class_weights[0]:.2f}, Malignant={class_weights[1]:.2f}")
+    class_weights = calculate_class_weights(train_labels, method='balanced').to(device)
     
-    criterion = FocalLoss(alpha=0.25, gamma=4.0, weight=class_weights)
+    criterion = FocalLoss(alpha=0.5, gamma=2.0, weight=class_weights)
     optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=3e-3)
     
     print(f"\n🏃‍♂️ Training 3 epochs to test stability...")

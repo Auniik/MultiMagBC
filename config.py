@@ -31,9 +31,9 @@ LABEL_SMOOTHING = 0.1  # Balanced smoothing to prevent overconfidence
 # Mixup augmentation settings
 MIXUP_ALPHA = 0.2  # Reverted from 0.4 - moderate augmentation
 
-# Focal loss settings optimized for lightweight model
-FOCAL_ALPHA = 0.25  # Favor malignant class detection (reduce false negatives)
-FOCAL_GAMMA = 4.0   # Higher focus on hard examples
+# Focal loss settings optimized for stability
+FOCAL_ALPHA = 0.5   # More balanced (was 0.25 - too aggressive)
+FOCAL_GAMMA = 2.0   # Moderate focus on hard examples (was 4.0 - too high)
 
 # Model settings
 BACKBONE = 'efficientnet_b0'
@@ -149,8 +149,13 @@ def mixup_criterion(criterion, pred, y_a, y_b, lam):
     """Calculate mixup loss"""
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
-def calculate_class_weights(train_labels):
-    """Calculate class weights for handling imbalanced dataset"""
+def calculate_class_weights(train_labels, method='balanced'):
+    """Calculate class weights for handling imbalanced dataset
+    
+    Args:
+        train_labels: List of training labels
+        method: 'balanced', 'moderate', or 'aggressive'
+    """
     import torch
     from collections import Counter
     
@@ -158,16 +163,42 @@ def calculate_class_weights(train_labels):
     total_samples = len(train_labels)
     num_classes = len(label_counts)
     
-    # Calculate more aggressive weights for lightweight model (favor malignant detection)
-    class_weights = []
-    for class_id in sorted(label_counts.keys()):
-        if class_id == 0:  # Benign class
-            weight = total_samples / (num_classes * label_counts[class_id]) * 2.0  # More aggressive
-        else:  # Malignant class
-            weight = total_samples / (num_classes * label_counts[class_id]) * 0.3  # More aggressive
-        class_weights.append(weight)
+    class_weights = []  # Initialize to fix potential unbound variable
     
-    return torch.tensor(class_weights, dtype=torch.float32)
+    if method == 'balanced':
+        # Sklearn-style balanced weights: n_samples / (n_classes * n_samples_class)
+        class_weights = []
+        for class_id in sorted(label_counts.keys()):
+            weight = total_samples / (num_classes * label_counts[class_id])
+            class_weights.append(weight)
+            
+    elif method == 'moderate':
+        # Moderate imbalance correction (less aggressive than original)
+        class_weights = []
+        for class_id in sorted(label_counts.keys()):
+            base_weight = total_samples / (num_classes * label_counts[class_id])
+            if class_id == 0:  # Benign class
+                weight = base_weight * 1.2  # Slight emphasis
+            else:  # Malignant class  
+                weight = base_weight * 0.8  # Slight de-emphasis
+            class_weights.append(weight)
+            
+    elif method == 'aggressive':
+        # Original aggressive weighting (for comparison)
+        class_weights = []
+        for class_id in sorted(label_counts.keys()):
+            if class_id == 0:  # Benign class
+                weight = total_samples / (num_classes * label_counts[class_id]) * 2.0
+            else:  # Malignant class
+                weight = total_samples / (num_classes * label_counts[class_id]) * 0.3
+            class_weights.append(weight)
+    
+    # Log the weights for debugging
+    weights_tensor = torch.tensor(class_weights, dtype=torch.float32)
+    print(f"📊 Class weights ({method}): Benign={weights_tensor[0]:.2f}, Malignant={weights_tensor[1]:.2f}")
+    print(f"   Weight ratio: {weights_tensor[0]/weights_tensor[1]:.1f}x (was 16.5x)")
+    
+    return weights_tensor
 
 def get_training_config():
     device = get_device()
