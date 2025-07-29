@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader
 
 
 from preprocess.multimagset import MultiMagPatientDataset
-from preprocess.preprocess import get_transforms
+from preprocess.preprocess import get_transforms, get_mixup_fn
 from training.train_mm_k_fold import eval_model, eval_model_with_threshold_optimization, train_one_epoch
 from sklearn.model_selection import train_test_split
 
@@ -70,7 +70,7 @@ def main():
     splitter.print_summary()
     patient_dict = splitter.patient_dict
 
-    train_transform, eval_transform = get_transforms()
+    train_transform, eval_transform, tta_transform = get_transforms()
 
     results_dir = os.path.join(config['output_dir'], 'results')
 

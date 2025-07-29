@@ -25,7 +25,7 @@ class PatientWiseKFoldSplitter:
         n_splits=5,
         random_state=42,
         stratify_subtype=False,
-        validation_split=0.2
+        validation_split=0.25  # 0.25 from 80% train = 20% val, leaving 60% final train
     ):
         self.dataset_dir = dataset_dir
         self.n_splits = n_splits
