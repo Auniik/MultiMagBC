@@ -66,13 +66,20 @@ def train_single_seed_model(fold_idx, train_pats, test_pats, patient_dict, confi
     from utils.helpers import seed_everything
     seed_everything(seed)
     
+    # Get full training config
+    from config import get_training_config
+    full_config = get_training_config()
+    
+    # Merge configs (prioritize passed config)
+    merged_config = {**full_config, **config}
+    
     # Create transforms
     train_transform, eval_transform, tta_transforms = create_transforms()
     
     # Create datasets (similar to main training loop)
     train_ds = MultiMagPatientDataset(
         patient_dict, train_pats, transform=train_transform, 
-        mode='train', samples_per_patient=config['samples_per_patient'],
+        mode='train', samples_per_patient=merged_config['samples_per_patient'],
         full_utilization_mode='max'
     )
     test_ds = MultiMagPatientDataset(
@@ -90,29 +97,29 @@ def train_single_seed_model(fold_idx, train_pats, test_pats, patient_dict, confi
     # Create validation dataset
     val_ds = MultiMagPatientDataset(
         patient_dict, val_pats, transform=eval_transform,
-        mode='val', samples_per_patient=config['val_samples_per_patient'],
+        mode='val', samples_per_patient=merged_config['val_samples_per_patient'],
         full_utilization_mode='max'
     )
     
     # Create training dataset
     train_ds_inner = MultiMagPatientDataset(
         patient_dict, train_pats_inner, transform=train_transform,
-        mode='train', samples_per_patient=config['samples_per_patient'],
+        mode='train', samples_per_patient=merged_config['samples_per_patient'],
         full_utilization_mode='max'
     )
     
     # Create data loaders
     train_loader_inner = DataLoader(
-        train_ds_inner, batch_size=config['batch_size'],
-        shuffle=True, num_workers=config['num_workers'], drop_last=True
+        train_ds_inner, batch_size=merged_config['batch_size'],
+        shuffle=True, num_workers=merged_config['num_workers'], drop_last=True
     )
     val_loader = DataLoader(
-        val_ds, batch_size=config['batch_size'],
-        shuffle=False, num_workers=config['num_workers']
+        val_ds, batch_size=merged_config['batch_size'],
+        shuffle=False, num_workers=merged_config['num_workers']
     )
     test_loader = DataLoader(
-        test_ds, batch_size=config['batch_size'], 
-        shuffle=False, num_workers=config['num_workers']
+        test_ds, batch_size=merged_config['batch_size'], 
+        shuffle=False, num_workers=merged_config['num_workers']
     )
     
     # Calculate class weights
@@ -122,22 +129,22 @@ def train_single_seed_model(fold_idx, train_pats, test_pats, patient_dict, confi
     # Initialize model
     model = MultiMagLightweightCNN(
         num_classes=2,
-        base_channels=config['base_channels'],
-        dropout=config['dropout']
+        base_channels=merged_config['base_channels'],
+        dropout=merged_config['dropout']
     ).to(device)
     
     # Loss function and optimizer
     criterion = FocalLoss(
-        alpha=config['focal_alpha'],
-        gamma=config['focal_gamma'],
+        alpha=merged_config['focal_alpha'],
+        gamma=merged_config['focal_gamma'],
         weight=class_weights,
-        label_smoothing=config['label_smoothing']
+        label_smoothing=merged_config['label_smoothing']
     )
     
     optimizer = optim.AdamW(
         model.parameters(),
-        lr=config['learning_rate'],
-        weight_decay=config['weight_decay']
+        lr=merged_config['learning_rate'],
+        weight_decay=merged_config['weight_decay']
     )
     
     # Quick training loop (simplified)
@@ -150,7 +157,7 @@ def train_single_seed_model(fold_idx, train_pats, test_pats, patient_dict, confi
         # Train
         train_loss, train_acc = train_one_epoch(
             model, train_loader_inner, criterion, optimizer, device,
-            use_mixup=True, mixup_alpha=config['mixup_alpha']
+            use_mixup=True, mixup_alpha=merged_config['mixup_alpha']
         )
         
         # Validate
@@ -172,9 +179,9 @@ def train_single_seed_model(fold_idx, train_pats, test_pats, patient_dict, confi
     )
     
     # Apply TTA
-    if config.get('use_tta', False):
+    if merged_config.get('use_tta', False):
         tta_acc, _, _ = test_time_augmentation(
-            model, test_loader, tta_transforms[:config['tta_steps']], 
+            model, test_loader, tta_transforms[:merged_config['tta_steps']], 
             device, optimal_threshold
         )
         if tta_acc > test_acc:
