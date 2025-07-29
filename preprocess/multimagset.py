@@ -73,18 +73,39 @@ class MultiMagPatientDataset(Dataset):
         for pid in self.patient_ids:
             stats = self.patient_image_counts[pid]
             if self.mode in ['val', 'test']:
-                samples = stats['min_per_mag']  # FULL utilization
+                # Maximum utilization for validation/test
+                if self.full_utilization_mode == 'max':
+                    samples = stats['max_per_mag']  # Use maximum available
+                elif self.full_utilization_mode == 'all':
+                    samples = int(stats['avg_per_mag'])  # Use average (all images)
+                else:  # 'min' - conservative approach
+                    samples = stats['min_per_mag']
             else:
+                # Training: adaptive sampling with higher limits for max utilization
                 avg_images = stats['avg_per_mag']
                 base = self.samples_per_patient or 1
-                if avg_images <= 15:
-                    samples = int(avg_images * 0.9)
-                elif avg_images <= 30:
-                    samples = int(avg_images * 0.85)
+                
+                if self.full_utilization_mode == 'max':
+                    # Aggressive utilization - use more images
+                    if avg_images <= 20:
+                        samples = int(avg_images * 0.95)
+                    elif avg_images <= 40:
+                        samples = int(avg_images * 0.9)
+                    else:
+                        samples = int(avg_images * 0.85)
+                    # Higher cap for maximum utilization
+                    samples = min(samples, stats['max_per_mag'], base * 5)
                 else:
-                    samples = int(avg_images * 0.8)
-                # Cap to avoid unrealistic oversampling
-                samples = min(samples, stats['min_per_mag'] * 2, base * 3)
+                    # Standard utilization
+                    if avg_images <= 15:
+                        samples = int(avg_images * 0.9)
+                    elif avg_images <= 30:
+                        samples = int(avg_images * 0.85)
+                    else:
+                        samples = int(avg_images * 0.8)
+                    # Standard cap
+                    samples = min(samples, stats['min_per_mag'] * 2, base * 3)
+                    
             effective[pid] = max(1, samples)
         return effective
 

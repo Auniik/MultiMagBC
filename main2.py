@@ -29,14 +29,15 @@ import torchvision.transforms as T
 def create_transforms():
     """Create data augmentation transforms optimized for lightweight model"""
     
-    # Lighter augmentation for small model
+    # Enhanced augmentation for better generalization
     train_transform = T.Compose([
         T.Resize((224, 224)),
         T.RandomHorizontalFlip(p=0.5),
         T.RandomVerticalFlip(p=0.5),
-        T.RandomRotation(degrees=10),  # Reduced from 15
-        T.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.1, hue=0.05),  # Reduced
-        T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))], p=0.2),  # Reduced
+        T.RandomRotation(degrees=15),  # Increased rotation
+        T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.1),  # Enhanced
+        T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))], p=0.3),
+        T.RandomApply([T.RandomAffine(degrees=0, translate=(0.1, 0.1))], p=0.3),  # Added translation
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
@@ -53,8 +54,8 @@ def create_transforms():
 def train_lightweight_model():
     """Main training function for lightweight model"""
     
-    print("=== Training MultiMagLightweightCNN ===")
-    print("Lightweight architecture with ~300K parameters\n")
+    print("=== Training Enhanced MultiMagLightweightCNN ===")
+    print("Enhanced architecture with improved capacity and regularization\n")
     
     # Setup
     from utils.helpers import seed_everything
@@ -75,16 +76,18 @@ def train_lightweight_model():
     # Create transforms
     train_transform, eval_transform = create_transforms()
     
-    # Hyperparameters optimized for lightweight model
+    # Hyperparameters optimized for better performance
     LIGHTWEIGHT_CONFIG = {
-        'base_channels': 24,  # Can increase to 32 for more capacity
-        'dropout': 0.3,       # Less dropout needed for smaller model
-        'learning_rate': 1e-4,  # Higher LR for faster convergence
-        'weight_decay': 1e-4,   # Less weight decay
-        'label_smoothing': 0.1,  # Less smoothing
-        'mixup_alpha': 0.1,      # Less mixup
+        'base_channels': 48,  # Increased capacity for better performance
+        'dropout': 0.6,       # Higher dropout for better regularization
+        'learning_rate': 1e-4,  # Optimal learning rate
+        'weight_decay': 1e-3,   # Stronger weight decay
+        'label_smoothing': 0.05,  # Reduced label smoothing
+        'mixup_alpha': 0.2,      # Standard mixup augmentation
         'focal_gamma': 2.0,
-        'focal_alpha': 0.7
+        'focal_alpha': 0.6,      # Balanced focal loss
+        'samples_per_patient': 5,  # More samples per patient
+        'val_samples_per_patient': 2
     }
     
     fold_metrics = []
@@ -95,9 +98,15 @@ def train_lightweight_model():
         
 
 
-        train_ds = MultiMagPatientDataset(patient_dict, train_pats, transform=train_transform, mode='train')
-        # val_ds = MultiMagPatientDataset(patient_dict, val_pats, transform=eval_transform, mode='val', full_utilization_mode='all')
-        test_ds = MultiMagPatientDataset(patient_dict, test_pats, transform=eval_transform, mode='test', full_utilization_mode='all')
+        train_ds = MultiMagPatientDataset(
+            patient_dict, train_pats, transform=train_transform, 
+            mode='train', samples_per_patient=LIGHTWEIGHT_CONFIG['samples_per_patient'],
+            full_utilization_mode='max'  # Maximum dataset utilization
+        )
+        test_ds = MultiMagPatientDataset(
+            patient_dict, test_pats, transform=eval_transform, 
+            mode='test', full_utilization_mode='max'  # Maximum dataset utilization
+        )
 
     
         
@@ -116,7 +125,7 @@ def train_lightweight_model():
         class_weights = calculate_class_weights(train_labels).to(device)
         print(f"Class weights: Benign={class_weights[0]:.2f}, Malignant={class_weights[1]:.2f}")
         
-        # Initialize model
+        # Initialize model with improved configuration
         model = MultiMagLightweightCNN(
             num_classes=2,
             base_channels=LIGHTWEIGHT_CONFIG['base_channels'],
@@ -153,9 +162,9 @@ def train_lightweight_model():
             patience=LR_SCHEDULER_PATIENCE,
         )
         
-        # Split for validation
+        # Split for validation - use 25% for better validation estimates
         train_pats_inner, val_pats = train_test_split(
-            train_pats, test_size=0.2,  # 20% validation instead of 30%
+            train_pats, test_size=0.25,  # 25% validation for better estimates
             random_state=42,
             stratify=[train_ds.patient_dict[pid]['label'] for pid in train_pats]
         )
@@ -163,7 +172,8 @@ def train_lightweight_model():
         # Create validation dataset
         val_ds = MultiMagPatientDataset(
             patient_dict, val_pats, transform=eval_transform,
-            #samples_per_patient=1, #adaptive_sampling=False
+            mode='val', samples_per_patient=LIGHTWEIGHT_CONFIG['val_samples_per_patient'],
+            full_utilization_mode='max'  # Maximum dataset utilization
         )
         val_loader = DataLoader(
             val_ds, batch_size=config['batch_size'],
@@ -173,7 +183,8 @@ def train_lightweight_model():
         # Update training dataset
         train_ds_inner = MultiMagPatientDataset(
             patient_dict, train_pats_inner, transform=train_transform,
-            #samples_per_patient=2, #adaptive_sampling=True
+            mode='train', samples_per_patient=LIGHTWEIGHT_CONFIG['samples_per_patient'],
+            full_utilization_mode='max'  # Maximum dataset utilization
         )
         train_loader_inner = DataLoader(
             train_ds_inner, batch_size=config['batch_size'],
@@ -201,7 +212,7 @@ def train_lightweight_model():
             
             # Validate with threshold optimization
             val_loss, val_acc, val_bal, val_f1, val_auc, prec, rec, threshold = eval_model_with_threshold_optimization(
-                model, val_loader, criterion, device, use_dropout=False  # No dropout for lightweight
+                model, val_loader, criterion, device, use_dropout=True  # Use dropout for better uncertainty
             )
             
             # Update scheduler
@@ -232,7 +243,7 @@ def train_lightweight_model():
             model.load_state_dict(best_model_state)
             save_path = os.path.join(
                 config['output_dir'], 'models', 
-                f'lightweight_model_fold_{fold_idx}.pth'
+                f'enhanced_lightweight_model_fold_{fold_idx}.pth'
             )
             torch.save({
                 'model_state_dict': best_model_state,
@@ -261,7 +272,7 @@ def train_lightweight_model():
             model.eval()
             with torch.no_grad():
                 # Get one batch for visualization
-                images_dict, labels = next(iter(test_loader))
+                images_dict, mask, labels = next(iter(test_loader))
                 images_dict = {k: v.to(device) for k, v in images_dict.items()}
                 
                 # Get attention maps
@@ -274,7 +285,7 @@ def train_lightweight_model():
     
     # Summary
     accs, bals, f1s, aucs = zip(*fold_metrics)
-    print("\n=== Cross-Validation Results (Lightweight Model) ===")
+    print("\n=== Cross-Validation Results (Enhanced Model) ===")
     print(f"Accuracy:  {np.mean(accs):.3f} ± {np.std(accs):.3f}")
     print(f"Balanced:  {np.mean(bals):.3f} ± {np.std(bals):.3f}")
     print(f"F1 Score:  {np.mean(f1s):.3f} ± {np.std(f1s):.3f}")
