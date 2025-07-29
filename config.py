@@ -31,9 +31,9 @@ LABEL_SMOOTHING = 0.1  # Balanced smoothing to prevent overconfidence
 # Mixup augmentation settings
 MIXUP_ALPHA = 0.2  # Reverted from 0.4 - moderate augmentation
 
-# Focal loss settings for balanced utilization
-FOCAL_ALPHA = 0.5   # More balanced class weighting (vs 70.7% malignant)
-FOCAL_GAMMA = 3.0   # Increased focus on hard examples with more data
+# Focal loss settings optimized for lightweight model
+FOCAL_ALPHA = 0.25  # Favor malignant class detection (reduce false negatives)
+FOCAL_GAMMA = 4.0   # Higher focus on hard examples
 
 # Model settings
 BACKBONE = 'efficientnet_b0'
@@ -158,10 +158,13 @@ def calculate_class_weights(train_labels):
     total_samples = len(train_labels)
     num_classes = len(label_counts)
     
-    # Calculate inverse frequency weights
+    # Calculate more aggressive weights for lightweight model (favor malignant detection)
     class_weights = []
     for class_id in sorted(label_counts.keys()):
-        weight = total_samples / (num_classes * label_counts[class_id])
+        if class_id == 0:  # Benign class
+            weight = total_samples / (num_classes * label_counts[class_id]) * 1.5  # Increased
+        else:  # Malignant class
+            weight = total_samples / (num_classes * label_counts[class_id]) * 0.5  # Decreased
         class_weights.append(weight)
     
     return torch.tensor(class_weights, dtype=torch.float32)
