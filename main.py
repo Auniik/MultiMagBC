@@ -123,14 +123,15 @@ def main():
         criterion = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, weight=class_weights, label_smoothing=LABEL_SMOOTHING)
         optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=LR_SCHEDULER_FACTOR, 
+            optimizer, mode='min', factor=LR_SCHEDULER_FACTOR, 
             patience=LR_SCHEDULER_PATIENCE
         )
         
-        best_val_bal_acc = 0
+        best_val_loss = float('inf')  # Changed from balanced accuracy to loss
         epochs_no_improve = 0
         best_model_state = None
         optimal_threshold = 0.5
+        best_val_bal_acc = 0  # Keep for logging purposes
         
         # Track metrics for learning curves and analysis
         train_losses, val_losses = [], []
@@ -151,7 +152,7 @@ def main():
             val_loss, val_acc, val_bal, val_f1, val_auc, val_prec, val_rec, threshold = eval_model_with_threshold_optimization(
                 model, val_loader, criterion, device, mc_dropout=True
             )
-            scheduler.step(val_bal) 
+            scheduler.step(val_loss)  # Step on validation loss 
              
             train_losses.append(train_loss)
             train_accuracies.append(train_acc)
@@ -188,14 +189,16 @@ def main():
                   f"Prec {val_prec:.3f}, Rec {val_rec:.3f}, Thresh {threshold:.3f} | LR: {optimizer.param_groups[0]['lr']:.6f} "
                   f"{overfitting_warning}{perfect_validation_warning}")
             
-            if val_bal > best_val_bal_acc:
-                best_val_bal_acc = val_bal
+            # Save model based on lowest validation loss (better generalization)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_val_bal_acc = val_bal  # Update for logging
                 best_model_state = model.state_dict().copy()
                 optimal_threshold = threshold
                 epochs_no_improve = 0
-                print(f"✅ New best validation balanced accuracy: {best_val_bal_acc:.3f}, threshold: {optimal_threshold:.3f}")
+                print(f"✅ New best validation loss: {best_val_loss:.4f} (BalAcc: {val_bal:.3f}, threshold: {optimal_threshold:.3f})")
                 importance = model.get_magnification_importance(val_loader, device)
-                print(f"📊 Mag Importance (Val BalAcc: {val_bal:.3f}): {importance}")
+                print(f"📊 Mag Importance (Val Loss: {val_loss:.4f}): {importance}")
             else:
                 epochs_no_improve += 1
             
@@ -208,7 +211,7 @@ def main():
             model.load_state_dict(best_model_state)
             ckpt_path = os.path.join(config['output_dir'], 'models', f"best_model_fold_{fold_idx}.pth")
             torch.save(best_model_state, ckpt_path)
-            print(f"✅ Best model saved: {ckpt_path} (Val BalAcc: {best_val_bal_acc:.3f})")
+            print(f"✅ Best model saved: {ckpt_path} (Val Loss: {best_val_loss:.4f}, BalAcc: {best_val_bal_acc:.3f})")
         
         # Final test evaluation with TTA for best performance
         from utils.tta import evaluate_with_tta 
