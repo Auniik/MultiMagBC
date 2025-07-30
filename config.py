@@ -13,7 +13,7 @@ IMAGE_SIZE = 224
 MAGNIFICATIONS = ['40X', '100X', '200X', '400X']
 
 # Training settings
-NUM_EPOCHS = 20
+NUM_EPOCHS = 30  # More epochs for 95% target
 LEARNING_RATE = 1e-4  # Increased from 5e-5 to accelerate learning
 RANDOM_SEED = 42
 EARLY_STOPPING_PATIENCE = 7  # Restored to original for stable training
@@ -45,9 +45,10 @@ OUTPUT_DIR = './output'
 
 # Dataset utilization settings for BALANCED maximum sampling
 MAX_UTILIZATION_MODE = True  # Enable maximum dataset utilization
-SAMPLES_PER_PATIENT_BALANCED = 5  # Balanced samples per patient (prevents overfitting)
-EPOCH_MULTIPLIER_BALANCED = 3     # 3x diverse combinations (optimal balance)
+SAMPLES_PER_PATIENT_BALANCED = 4  # Reduced to normalize high-volume patients
+EPOCH_MULTIPLIER_BALANCED = 2     # Reduced to prevent overfitting on outlier patients
 VAL_SAMPLES_PER_PATIENT_BALANCED = 2  # Balanced validation samples
+MAX_IMAGES_PER_PATIENT = 100  # Cap to reduce impact of outlier patients (235 → 100)
 
 def get_device():
     if torch.cuda.is_available():

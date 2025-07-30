@@ -22,7 +22,7 @@ from config import (SLIDES_PATH, LEARNING_RATE, NUM_EPOCHS, EARLY_STOPPING_PATIE
                     FOCAL_ALPHA, FOCAL_GAMMA, LABEL_SMOOTHING, MIXUP_ALPHA, FocalLoss, 
                     get_training_config, calculate_class_weights, mixup_data, mixup_criterion)
 from evaluate.gradcam import GradCAM, visualize_gradcam
-from preprocess.kfold_splitter import PatientWiseKFoldSplitter
+from preprocess.high_quality_splitter import HighQualitySplitter
 
 from torch.utils.data import DataLoader
 
@@ -62,10 +62,12 @@ def main():
     from preprocess.analyze import analyze_dataset
     analyze_dataset()
 
-    splitter = PatientWiseKFoldSplitter(
+    splitter = HighQualitySplitter(
         dataset_dir=SLIDES_PATH,
         n_splits=5,
-        stratify_subtype=False
+        validation_split=0.2,
+        min_images_per_patient=80,
+        balanced_subtypes=True
     )
     splitter.print_summary()
     patient_dict = splitter.patient_dict
