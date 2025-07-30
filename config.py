@@ -205,7 +205,7 @@ def get_training_config():
     
     if device.type == 'cuda':
         batch_size = 32  # Increased from 16 - better GPU utilization
-        num_workers = 12  # Increased from 8 - faster data loading  
+        num_workers = 16  # Increased for high-end GPUs like 4090
         environment = 'cuda'
     elif device.type == 'mps':
         batch_size = 8
@@ -231,5 +231,6 @@ def get_training_config():
         'random_seed': RANDOM_SEED,
         'pin_memory': True if device.type == 'cuda' else False,
         'persistent_workers': True if device.type == 'cuda' and num_workers > 0 else False,
+        'prefetch_factor': 4 if device.type == 'cuda' else 2,  # Prefetch more batches
         'output_dir': OUTPUT_DIR
     }

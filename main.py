@@ -103,18 +103,21 @@ def main():
             shuffle=(sampler is None),
             num_workers=config['num_workers'], pin_memory=config['pin_memory'],
             persistent_workers=config.get('persistent_workers', False),
+            prefetch_factor=config.get('prefetch_factor', 2),
             drop_last=True
         )
         
         test_loader = DataLoader(
             test_ds, batch_size=config['batch_size'], shuffle=False, 
             num_workers=config['num_workers'], pin_memory=config['pin_memory'],
-            persistent_workers=config.get('persistent_workers', False)
+            persistent_workers=config.get('persistent_workers', False),
+            prefetch_factor=config.get('prefetch_factor', 2)
         )
         val_loader = DataLoader(
             val_ds, batch_size=config['batch_size'], shuffle=False, 
             num_workers=config['num_workers'], pin_memory=config['pin_memory'],
-            persistent_workers=config.get('persistent_workers', False)
+            persistent_workers=config.get('persistent_workers', False),
+            prefetch_factor=config.get('prefetch_factor', 2)
         )
 
         train_labels = [train_ds.patient_dict[pid]['label'] for pid in train_pats]
