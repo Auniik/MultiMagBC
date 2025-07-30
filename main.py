@@ -8,6 +8,7 @@ import json
 import csv
 import time
 from typing import Any, Dict, List
+from xml.parsers.expat import model
 import numpy as np
 from sklearn.metrics import confusion_matrix, roc_curve
 import matplotlib.pyplot as plt
@@ -21,18 +22,26 @@ from config import (SLIDES_PATH, LEARNING_RATE, NUM_EPOCHS, EARLY_STOPPING_PATIE
                     SAMPLES_PER_PATIENT_BALANCED, EPOCH_MULTIPLIER_BALANCED, VAL_SAMPLES_PER_PATIENT_BALANCED,
                     FOCAL_ALPHA, FOCAL_GAMMA, LABEL_SMOOTHING, MIXUP_ALPHA, FocalLoss, 
                     get_training_config, calculate_class_weights, mixup_data, mixup_criterion)
+
 from evaluate.gradcam import GradCAM, visualize_gradcam
 from preprocess.high_quality_splitter import HighQualitySplitter
 
 from torch.utils.data import DataLoader
 
 
+from preprocess.kfold_splitter import PatientWiseKFoldSplitter
 from preprocess.multimagset import MultiMagPatientDataset
 from preprocess.preprocess_light import get_fast_transforms as get_transforms, get_mixup_fn
 from training.train_mm_k_fold import eval_model, eval_model_with_threshold_optimization, train_one_epoch
 from sklearn.model_selection import train_test_split
 
 from utils.stats import save_as_json
+from utils.helpers import seed_everything
+# Final test evaluation with TTA for best performance
+from utils.tta import evaluate_with_tta 
+# from utils.calibration import temperature_scaling
+# from utils.metrics import per_subtype_metrics
+# from utils.hyperopt import run_hyperparam_search
 
 def boot(config):
     results_dir = os.path.join(config['output_dir'], 'results')
@@ -47,7 +56,6 @@ def boot(config):
 def main():
     print("MMNet - Multi-Magnification Network for Breast Cancer Classification")
 
-    from utils.helpers import seed_everything
     config = get_training_config()
     device = config['device']
     seed_everything(config['random_seed'])
@@ -58,16 +66,10 @@ def main():
 
     boot(config)
     
-    print("\nDataset Analysis:")
-    from preprocess.analyze import analyze_dataset
-    analyze_dataset()
-
-    splitter = HighQualitySplitter(
+    splitter = PatientWiseKFoldSplitter(
         dataset_dir=SLIDES_PATH,
         n_splits=5,
-        validation_split=0.2,
-        min_images_per_patient=80,
-        balanced_subtypes=True
+        stratify_subtype=True
     )
     splitter.print_summary()
     patient_dict = splitter.patient_dict
@@ -78,15 +80,18 @@ def main():
 
     fold_metrics = []
     importance_scores = []
+    thresholds = []
+    subtype_results = []
     for fold_idx in range(len(splitter.folds)):
         print(f"\n===== Fold {fold_idx} =====")
 
         train_pats, val_pats, test_pats = splitter.get_fold(fold_idx)
         print(f"Train patients: {len(train_pats)}, Val Patients: {len(val_pats)}, Test patients: {len(test_pats)}")
 
-        train_ds = MultiMagPatientDataset(patient_dict, train_pats, transform=train_transform, mode='train')
-        val_ds = MultiMagPatientDataset(patient_dict, val_pats, transform=eval_transform, mode='val', full_utilization_mode='all')
-        test_ds = MultiMagPatientDataset(patient_dict, test_pats, transform=eval_transform, mode='test', full_utilization_mode='all')
+        train_ds = MultiMagPatientDataset(patient_dict, train_pats, transform=train_transform, mode='train',
+                                          sampling_mode='strict', class_balanced_sampling=True, subtype_balancing=True)
+        val_ds = MultiMagPatientDataset(patient_dict, val_pats, transform=eval_transform, mode='val', class_balanced_sampling=False, sampling_mode='strict')
+        test_ds = MultiMagPatientDataset(patient_dict, test_pats, transform=eval_transform, mode='test', class_balanced_sampling=False, sampling_mode='relaxed')
 
         train_stats = train_ds.get_sampling_stats()
         print(f"Training samples per epoch: {train_stats}")
@@ -108,6 +113,20 @@ def main():
             prefetch_factor=config.get('prefetch_factor', 2),
             drop_last=True
         )
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=effective_batch_size,
+            sampler=sampler if sampler else None,
+            shuffle=(sampler is None),
+            num_workers=config['num_workers'],
+            pin_memory=config['pin_memory'],
+            persistent_workers=config.get('persistent_workers', False),
+            prefetch_factor=config.get('prefetch_factor', 2),
+            drop_last=True
+        )
+        # print(f"📊 Final Patient Weights (Sample): {dict(list(train_ds.patient_weights.items())[:5])}")
+        # print(f"📊 Class Distribution (Samples): {train_stats['class_distribution']}")
+        # print(f"📊 Subtype Distribution (Samples): {train_stats['subtype_distribution']}")
         
         test_loader = DataLoader(
             test_ds, batch_size=config['batch_size'], shuffle=False, 
@@ -123,23 +142,29 @@ def main():
         )
 
         train_labels = [train_ds.patient_dict[pid]['label'] for pid in train_pats]
-        class_weights = calculate_class_weights(train_labels, method='balanced').to(device)
+        # class_weights = calculate_class_weights(train_labels, method='balanced').to(device)
         
         epochs = NUM_EPOCHS
-        # Use lightweight model for better generalization
         model = MultiMagLightweightCNN(num_classes=2, dropout=DROPOUT_RATE).to(device)
-        criterion = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, weight=class_weights, label_smoothing=LABEL_SMOOTHING)
-        optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=LR_SCHEDULER_FACTOR, 
-            patience=LR_SCHEDULER_PATIENCE
+        criterion = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, weight=None, label_smoothing=LABEL_SMOOTHING)
+        optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.99))
+        # scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        #     optimizer, mode='min', factor=LR_SCHEDULER_FACTOR, 
+        #     patience=LR_SCHEDULER_PATIENCE
+        # )
+
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=10,
+            T_mult=2,
+            eta_min=1e-6
         )
         
-        best_val_loss = float('inf')  # Changed from balanced accuracy to loss
+        best_val_loss = float('inf')
         epochs_no_improve = 0
         best_model_state = None
         optimal_threshold = 0.5
-        best_val_bal_acc = 0  # Keep for logging purposes
+        best_val_bal_acc = 0 
         
         # Track metrics for learning curves and analysis
         train_losses, val_losses = [], []
@@ -149,38 +174,39 @@ def main():
         overfitting_threshold = 0.1
         importance = {}
         
+        
         for epoch in range(1, epochs+1):
             # Set epoch for deterministic sampling diversity
             train_ds.set_epoch(epoch)
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterion, optimizer, device, 
+                scheduler=scheduler,
                 use_mixup=True,
-                mixup_alpha=MIXUP_ALPHA
+                mixup_alpha=MIXUP_ALPHA,
+                epoch=epoch
             )
-            val_loss, val_acc, val_bal, val_f1, val_auc, val_prec, val_rec, threshold = eval_model_with_threshold_optimization(
+            history = eval_model_with_threshold_optimization(
                 model, val_loader, criterion, device, mc_dropout=True
             )
-            scheduler.step(val_loss)  # Step on validation loss 
-             
+
             train_losses.append(train_loss)
             train_accuracies.append(train_acc)
-            val_losses.append(val_loss)
-            val_accuracies.append(val_acc)
+            val_losses.append(history['val_loss'])
+            val_accuracies.append(history['val_acc'])
             val_metrics_history.append({
                 'epoch': epoch,
-                'val_acc': val_acc,
-                'val_bal': val_bal,
-                'val_f1': val_f1,
-                'val_auc': val_auc,
-                'val_prec': val_prec,
-                'val_rec': val_rec
+                'val_acc': history['val_acc'],
+                'val_bal': history['val_bal'],
+                'val_f1': history['val_f1'],
+                'val_auc': history['val_auc'],
+                'val_prec': history['val_prec'],
+                'val_rec': history['val_rec']
             })
-            
             
             # Overfitting detection
             overfitting_warning = ""
             perfect_validation_warning = ""
-            if val_loss > train_loss + 0.15:
+            if history['val_loss'] > train_loss + 0.15:
                 overfitting_warning = " [VAL LOSS DIVERGENCE]"
             
             # Check for train-validation loss divergence
@@ -192,27 +218,29 @@ def main():
             
             print(f"Epoch {epoch:02d}: "
                   f"Train: Loss {train_loss:.4f}, Acc {train_acc:.3f} | "
-                  f"Val: Loss {val_loss:.4f}, Acc {val_acc:.3f}, "
-                  f"BalAcc {val_bal:.3f}, F1 {val_f1:.3f}, AUC {val_auc:.3f}, "
-                  f"Prec {val_prec:.3f}, Rec {val_rec:.3f}, Thresh {threshold:.3f} | LR: {optimizer.param_groups[0]['lr']:.6f} "
+                  f"Val: Loss {history['val_loss']:.4f}, Acc {history['val_acc']:.3f}, "
+                  f"BalAcc {history['val_bal']:.3f}, F1 {history['val_f1']:.3f}, AUC {history['val_auc']:.3f}, "
+                  f"Prec {history['val_prec']:.3f}, Rec {history['val_rec']:.3f}, Thresh {history['optimal_threshold']:.3f} | LR: {optimizer.param_groups[0]['lr']:.6f} "
                   f"{overfitting_warning}{perfect_validation_warning}")
             
             # Save model based on lowest validation loss (better generalization)
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_val_bal_acc = val_bal  # Update for logging
+            if history['val_loss'] < best_val_loss:
+                best_val_loss = history['val_loss']
+                best_val_bal_acc = history['val_bal']
                 best_model_state = model.state_dict().copy()
-                optimal_threshold = threshold
+                optimal_threshold = history['optimal_threshold']
                 epochs_no_improve = 0
-                print(f"✅ New best validation loss: {best_val_loss:.4f} (BalAcc: {val_bal:.3f}, threshold: {optimal_threshold:.3f})")
+                print(f" ✅ New best validation loss: {best_val_loss:.4f} (BalAcc: {best_val_bal_acc:.3f}, threshold: {optimal_threshold:.3f})")
                 importance = model.get_magnification_importance(val_loader, device)
-                print(f"📊 Mag Importance (Val Loss: {val_loss:.4f}): {importance}")
+                print(f" 📊 Mag Importance (Val Loss: {history['val_loss']:.4f}): {importance}")
             else:
                 epochs_no_improve += 1
             
             if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
-                print(f"⚠️ Early stopping after {epoch} epochs (no improvement for {EARLY_STOPPING_PATIENCE} epochs)")
+                print(f" ⚠️ Early stopping after {epoch} epochs (no improvement for {EARLY_STOPPING_PATIENCE} epochs)")
                 break
+        
+
         
         # Load best model and evaluate on test set with optimized threshold
         if best_model_state is not None:
@@ -221,8 +249,7 @@ def main():
             torch.save(best_model_state, ckpt_path)
             print(f"✅ Best model saved: {ckpt_path} (Val Loss: {best_val_loss:.4f}, BalAcc: {best_val_bal_acc:.3f})")
         
-        # Final test evaluation with TTA for best performance
-        from utils.tta import evaluate_with_tta 
+        
         metrics = evaluate_with_tta(
             model, test_loader, device, optimal_threshold
         )

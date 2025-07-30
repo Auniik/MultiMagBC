@@ -7,6 +7,8 @@ import torch
 import torch.nn.functional as F
 from typing import Dict, List
 import numpy as np
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, confusion_matrix, roc_curve
+import time
 
 
 def apply_tta_transforms(images_dict: Dict[str, torch.Tensor]) -> List[Dict[str, torch.Tensor]]:
@@ -81,21 +83,12 @@ def tta_predict(model, images_dict: Dict[str, torch.Tensor], mask=None) -> torch
     return avg_prediction
 
 
-def evaluate_with_tta(model, dataloader, device, optimal_threshold=0.5):
+def evaluate_with_tta(model, dataloader, device, optimal_threshold=0.5, return_raw=False):
     """
-    Evaluate model with test-time augmentation.
+    Evaluate model with test-time augmentation. 
+    If return_raw=True, also return raw probabilities and labels for external analysis.
+    """
     
-    Args:
-        model: Trained model
-        dataloader: Test data loader
-        device: Device to run on
-        optimal_threshold: Classification threshold
-        
-    Returns:
-        Dictionary with evaluation metrics
-    """
-    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, confusion_matrix, roc_curve
-    import time
     
     model.eval()
     all_preds, all_labels, all_probs = [], [], []
@@ -103,23 +96,16 @@ def evaluate_with_tta(model, dataloader, device, optimal_threshold=0.5):
     
     with torch.no_grad():
         for images_dict, mask, labels in dataloader:
-            # Move to device
             images_dict = {k: v.to(device) for k, v in images_dict.items()}
             mask = mask.to(device)
             labels = labels.to(device)
-            
-            # TTA prediction
             logits = tta_predict(model, images_dict, mask)
-            
-            # Get probabilities
             probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
             all_probs.extend(probs)
             all_labels.extend(labels.cpu().numpy())
     
-    # Apply threshold
     all_preds = (np.array(all_probs) >= optimal_threshold).astype(int)
     
-    # Calculate metrics
     accuracy = accuracy_score(all_labels, all_preds)
     balanced_accuracy = balanced_accuracy_score(all_labels, all_preds)
     f1 = f1_score(all_labels, all_preds)
@@ -127,14 +113,12 @@ def evaluate_with_tta(model, dataloader, device, optimal_threshold=0.5):
     recall = recall_score(all_labels, all_preds)
     auc = roc_auc_score(all_labels, all_probs)
     cm = confusion_matrix(all_labels, all_preds)
-    
-    # ROC curve data for compatibility with main.py
     fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
     
     end_time = time.time()
     avg_inference_time = (end_time - start_time) / len(all_labels)
     
-    return {
+    results = {
         'accuracy': accuracy,
         'balanced_accuracy': balanced_accuracy, 
         'f1_score': f1,
@@ -147,3 +131,6 @@ def evaluate_with_tta(model, dataloader, device, optimal_threshold=0.5):
         'tpr': tpr.tolist(), 
         'thresholds': thresholds.tolist()
     }
+    if return_raw:
+        results.update({'all_labels': all_labels, 'all_probs': all_probs})
+    return results

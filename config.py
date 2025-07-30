@@ -32,7 +32,7 @@ LABEL_SMOOTHING = 0.1  # Balanced smoothing to prevent overconfidence
 MIXUP_ALPHA = 0.2  # Reverted from 0.4 - moderate augmentation
 
 # Focal loss settings optimized for stability
-FOCAL_ALPHA = 0.5   # More balanced (was 0.25 - too aggressive)
+FOCAL_ALPHA = 0.25   # More balanced (was 0.25 - too aggressive)
 FOCAL_GAMMA = 2.0   # Moderate focus on hard examples (was 4.0 - too high)
 
 # Model settings
@@ -53,8 +53,8 @@ MAX_IMAGES_PER_PATIENT = 100  # Cap to reduce impact of outlier patients (235 â†
 def get_device():
     if torch.cuda.is_available():
         return torch.device('cuda')
-    # elif torch.backends.mps.is_available():
-    #     return torch.device('mps')
+    elif torch.backends.mps.is_available():
+        return torch.device('mps')
     else:
         return torch.device('cpu')
 
@@ -232,6 +232,6 @@ def get_training_config():
         'random_seed': RANDOM_SEED,
         'pin_memory': True if device.type == 'cuda' else False,
         'persistent_workers': True if device.type == 'cuda' and num_workers > 0 else False,
-        'prefetch_factor': 4 if device.type == 'cuda' else 2,  # Prefetch more batches
+        'prefetch_factor': 4 if device.type == 'cuda' else None,  # Prefetch more batches
         'output_dir': OUTPUT_DIR
     }

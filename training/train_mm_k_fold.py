@@ -9,14 +9,14 @@ from config import mixup_data, mixup_criterion
 from utils.helpers import safe_autocast
 
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=True, mixup_alpha=0.2, accumulation_steps=1):
+def train_one_epoch(model, dataloader, criterion, optimizer, device, scheduler=None, use_mixup=True, mixup_alpha=0.2, accumulation_steps=1, epoch=0):
     model.train()
     scaler = torch.GradScaler(enabled=(device.type == "cuda"))
     losses = []
     all_preds, all_labels = [], []
     optimizer.zero_grad()
 
-    for batch_idx, (images_dict, mask, labels) in enumerate(tqdm(dataloader, desc='Train', leave=False)):
+    for batch_idx, (images_dict, mask, labels) in enumerate(tqdm(dataloader, desc=f'Train Epoch {epoch}', leave=False)):
         images = {k: v.to(device, non_blocking=True) for k, v in images_dict.items()}
         labels = labels.to(device, non_blocking=True)
         mask = mask.to(device, non_blocking=True)
@@ -26,8 +26,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
                 mixed_images, y_a, y_b, lam = mixup_data(images, labels, mixup_alpha, device)
                 logits = model(mixed_images, mask)
                 loss = mixup_criterion(criterion, logits, y_a, y_b, lam)
-                lam_tensor = torch.full_like(y_a, lam)
-                dominant_labels = torch.where(lam_tensor >= 0.5, y_a, y_b)
+                dominant_labels = torch.where(torch.full_like(y_a, lam) >= 0.5, y_a, y_b)
                 preds = torch.argmax(logits, dim=1).cpu().numpy()
                 all_labels.extend(dominant_labels.cpu().numpy())
             else:
@@ -36,9 +35,15 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
                 preds = torch.argmax(logits, dim=1).cpu().numpy()
                 all_labels.extend(labels.cpu().numpy())
 
-        all_preds.extend(preds)
+        # Skip invalid losses
+        if not torch.isfinite(loss):
+            print(f"⚠️ Skipping batch {batch_idx} due to non-finite loss.")
+            continue
 
-        # Scaled backward pass
+        all_preds.extend(preds)
+        losses.append(float(loss))
+
+        # Backpropagation
         scaler.scale(loss / accumulation_steps).backward()
 
         # Gradient accumulation & step
@@ -48,7 +53,9 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, use_mixup=T
             scaler.update()
             optimizer.zero_grad()
 
-        losses.append(float(loss))
+        # **CosineAnnealingWarmRestarts: step per batch**
+        if scheduler:
+            scheduler.step(epoch + batch_idx / len(dataloader))
 
     # Handle leftover gradients if dataloader length not divisible by accumulation_steps
     if len(dataloader) % accumulation_steps != 0:
@@ -150,8 +157,14 @@ def set_dropout_train_only(model):
             module.eval()
     
 
-def eval_model_with_threshold_optimization(model, dataloader, criterion, device, mc_dropout=True):
-    """Evaluate model with mixed precision (AMP) and safe threshold finding."""
+def eval_model_with_threshold_optimization(
+    model, dataloader, criterion, device,
+    mc_dropout=True, optimize_for='accuracy',
+    return_probs=False
+):
+    """Evaluate model with threshold optimization and optional MC-Dropout."""
+    was_training = model.training
+    
     if mc_dropout:
         model.train()
         set_dropout_train_only(model)
@@ -159,8 +172,7 @@ def eval_model_with_threshold_optimization(model, dataloader, criterion, device,
     else:
         model.eval()
 
-    losses = []
-    all_labels, all_probs = [], []
+    losses, all_labels, all_probs = [], [], []
 
     with torch.no_grad():
         for batch_idx, (images_dict, mask, labels) in enumerate(tqdm(dataloader, desc='Val ', leave=False)):
@@ -170,26 +182,29 @@ def eval_model_with_threshold_optimization(model, dataloader, criterion, device,
 
             with safe_autocast(device):
                 logits = model(images, mask)
-                # Clamp logits to avoid softmax overflow
-                logits = torch.clamp(logits, -20, 20)
+                logits = torch.clamp(logits, -20, 20)  # prevent overflow
                 loss = criterion(logits, labels)
 
             losses.append(float(loss))
             probs = torch.softmax(logits, dim=1)[:, 1].float().cpu().numpy()
 
-            # Replace NaNs immediately if any
             if np.isnan(probs).any():
-                print(f"⚠️ NaN detected in batch {batch_idx} probs. Replacing with 0.5.")
+                print(f"⚠️ NaN detected in batch {batch_idx}. Replacing with 0.5.")
                 probs = np.nan_to_num(probs, nan=0.5, posinf=1.0, neginf=0.0)
 
             all_probs.extend(probs.tolist())
             all_labels.extend(labels.cpu().numpy())
 
+    # Restore model mode
     if mc_dropout:
         torch.set_grad_enabled(True)
+    if was_training:
+        model.train()
+    else:
+        model.eval()
 
-    # Find optimal threshold (now safe)
-    optimal_threshold = find_optimal_threshold(all_labels, all_probs, optimize_for='accuracy')
+    # Optimize threshold
+    optimal_threshold = find_optimal_threshold(all_labels, all_probs, optimize_for=optimize_for)
     all_preds = (np.array(all_probs) >= optimal_threshold).astype(int)
 
     # Metrics
@@ -199,5 +214,21 @@ def eval_model_with_threshold_optimization(model, dataloader, criterion, device,
     auc = roc_auc_score(all_labels, all_probs)
     precision = precision_score(all_labels, all_preds)
     recall = recall_score(all_labels, all_preds)
+    cm = confusion_matrix(all_labels, all_preds)
 
-    return np.mean(losses), acc, bal_acc, f1, auc, precision, recall, optimal_threshold
+    result = {
+        'val_loss': np.mean(losses),
+        'val_acc': acc,
+        'val_bal': bal_acc,
+        'val_f1': f1,
+        'val_auc': auc,
+        'val_prec': precision,
+        'val_rec': recall,
+        'optimal_threshold': optimal_threshold,
+        'confusion_matrix': cm.tolist()
+    }
+    if return_probs:
+        result['probabilities'] = all_probs
+        result['labels'] = all_labels
+
+    return result

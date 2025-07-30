@@ -83,36 +83,72 @@ class PatientWiseKFoldSplitter:
         return patient_dict, sorted(list(magnifications_set))
 
     def _create_folds(self):
+        """
+        Create subtype- and label-balanced K folds for patient-wise CV.
+        Ensures:
+        - Each fold has all subtypes (rarest first assignment).
+        - Benign/malignant distribution is balanced.
+        - Fold sizes are close to equal.
+        """
         patient_ids = list(self.patient_dict.keys())
-        labels = [self.patient_dict[pid]['label'] for pid in patient_ids]
-        if self.stratify_subtype:
-            subtypes = [self.patient_dict[pid]['subtype'] for pid in patient_ids]
-            y = [f"{lab}_{sub}" for lab, sub in zip(labels, subtypes)]
-        else:
-            y = labels
 
-        skf = StratifiedKFold(
-            n_splits=self.n_splits,
-            shuffle=True,
-            random_state=self.random_state
-        )
-        folds = []
-        for train_idx, test_idx in skf.split(patient_ids, y):
-            train_pats = [patient_ids[i] for i in train_idx]
-            test_pats = [patient_ids[i] for i in test_idx]
-            folds.append((train_pats, test_pats))
-        return folds
+        # Group patients by subtype
+        subtype_groups = {}
+        for pid in patient_ids:
+            subtype = self.patient_dict[pid]['subtype']
+            subtype_groups.setdefault(subtype, []).append(pid)
+
+        # Sort subtypes by rarity (rarest first)
+        subtype_groups = dict(sorted(subtype_groups.items(), key=lambda x: len(x[1])))
+
+        folds = [[] for _ in range(self.n_splits)]
+
+        # Greedy assignment: balance subtype, then label, then size
+        for subtype, patients in subtype_groups.items():
+            random.shuffle(patients)
+            for pid in patients:
+                target_label = self.patient_dict[pid]['label']
+                # Compute per-fold scores (subtype count, label count, size)
+                fold_scores = []
+                for fold in folds:
+                    subtype_count = sum(1 for p in fold if self.patient_dict[p]['subtype'] == subtype)
+                    label_count = sum(1 for p in fold if self.patient_dict[p]['label'] == target_label)
+                    fold_scores.append((subtype_count, label_count, len(fold)))
+                # Pick fold with minimal counts (subtype > label > size)
+                min_fold = min(range(len(fold_scores)), key=lambda i: (fold_scores[i][0], fold_scores[i][1], fold_scores[i][2]))
+                folds[min_fold].append(pid)
+
+        # Standard K-fold: test = 1 fold, train+val = remaining folds
+        return [([p for j, f in enumerate(folds) if j != i for p in f], folds[i]) for i in range(self.n_splits)]
+    
+    def _subtype_stratified_split(self, patient_list, val_fraction=0.25):
+        """Greedy subtype-aware split for val inside train."""
+        # Group patients by subtype
+        subtype_groups = {}
+        for pid in patient_list:
+            subtype = self.patient_dict[pid]['subtype']
+            subtype_groups.setdefault(subtype, []).append(pid)
+
+        # Sort by rarity
+        subtype_groups = dict(sorted(subtype_groups.items(), key=lambda x: len(x[1])))
+
+        val_size = int(len(patient_list) * val_fraction)
+        val_set = set()
+        train_set = set(patient_list)
+
+        for subtype, patients in subtype_groups.items():
+            random.shuffle(patients)
+            n_val = max(1, int(len(patients) * val_fraction))
+            selected = patients[:n_val]
+            val_set.update(selected)
+            train_set.difference_update(selected)
+
+        return list(train_set), list(val_set)
 
     def get_fold(self, fold_idx, return_type='patients'):
         """Returns train/val/test splits for a fold."""
         train_pats, test_pats = self.folds[fold_idx]
-
-        # Stratified train/val split
-        labels = [self.patient_dict[pid]['label'] for pid in train_pats]
-        sss = StratifiedShuffleSplit(n_splits=1, test_size=self.validation_split, random_state=self.random_state)
-        train_idx, val_idx = next(sss.split(train_pats, labels))
-        val_pats = [train_pats[i] for i in val_idx]
-        train_pats = [train_pats[i] for i in train_idx]
+        train_pats, val_pats = self._subtype_stratified_split(train_pats, self.validation_split)
 
         if return_type == 'patients':
             return train_pats, val_pats, test_pats
@@ -131,15 +167,48 @@ class PatientWiseKFoldSplitter:
         """Returns a list of (train, val, test) for all folds."""
         return [self.get_fold(i, return_type=return_type) for i in range(self.n_splits)]
 
+    # def print_summary(self):
+    #     print("=== Fold-wise Dataset Summary ===")
+    #     for i, (train_pats, test_pats) in enumerate(self.folds):
+    #         train_labels = [self.patient_dict[pid]['label'] for pid in train_pats]
+    #         test_labels = [self.patient_dict[pid]['label'] for pid in test_pats]
+    #         train_images = sum(len(imgs) for pid in train_pats for imgs in self.patient_dict[pid]['images'].values())
+    #         test_images = sum(len(imgs) for pid in test_pats for imgs in self.patient_dict[pid]['images'].values())
+    #         print(f"Fold {i}: Train patients: {len(train_pats)} (images={train_images}, B/M = {train_labels.count(0)}/{train_labels.count(1)}); "
+    #               f"Test patients: {len(test_pats)} (images={test_images}, B/M = {test_labels.count(0)}/{test_labels.count(1)})")
+
     def print_summary(self):
-        print("=== Fold-wise Dataset Summary ===")
+        print("=== Fold-wise Dataset Fairness Summary ===")
+        all_subtypes = sorted(set([self.patient_dict[pid]['subtype'] for pid in self.patient_dict]))
+
         for i, (train_pats, test_pats) in enumerate(self.folds):
-            train_labels = [self.patient_dict[pid]['label'] for pid in train_pats]
-            test_labels = [self.patient_dict[pid]['label'] for pid in test_pats]
-            train_images = sum(len(imgs) for pid in train_pats for imgs in self.patient_dict[pid]['images'].values())
-            test_images = sum(len(imgs) for pid in test_pats for imgs in self.patient_dict[pid]['images'].values())
-            print(f"Fold {i}: Train patients: {len(train_pats)} (images={train_images}, B/M = {train_labels.count(0)}/{train_labels.count(1)}); "
-                  f"Test patients: {len(test_pats)} (images={test_images}, B/M = {test_labels.count(0)}/{test_labels.count(1)})")
+            # Add validation
+            train_only, val_pats = self._subtype_stratified_split(train_pats, self.validation_split)
+
+            def summarize(patients):
+                labels = [self.patient_dict[pid]['label'] for pid in patients]
+                subtypes = [self.patient_dict[pid]['subtype'] for pid in patients]
+                mag_counts = {m: sum(len(self.patient_dict[pid]['images'].get(m, [])) for pid in patients) for m in self.magnifications}
+                return {
+                    'patients': len(patients),
+                    'benign': labels.count(0),
+                    'malignant': labels.count(1),
+                    'benign_pct': round(labels.count(0)/len(patients)*100,1),
+                    'subtypes_present': sorted(set(subtypes)),
+                    'magnification_counts': mag_counts
+                }
+
+            train_stats = summarize(train_only)
+            val_stats = summarize(val_pats)
+            test_stats = summarize(test_pats)
+
+            print(f"\n--- Fold {i} ---")
+            print(f"Train: {train_stats['patients']} patients ({train_stats['benign']}/{train_stats['malignant']} B/M, {train_stats['benign_pct']}% benign)")
+            print(f"Val:   {val_stats['patients']} patients ({val_stats['benign']}/{val_stats['malignant']} B/M, {val_stats['benign_pct']}% benign)")
+            print(f"Test:  {test_stats['patients']} patients ({test_stats['benign']}/{test_stats['malignant']} B/M, {test_stats['benign_pct']}% benign)")
+            print(f"Subtypes present (Train): {', '.join(train_stats['subtypes_present'])}")
+            print(f"Subtypes present (Test):  {', '.join(test_stats['subtypes_present'])}")
+            print(f"Magnification distribution (Train): {train_stats['magnification_counts']}")
 
     def save_metadata(self, path="./output/dataset/fold_splits.json"):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -151,45 +220,69 @@ class PatientWiseKFoldSplitter:
     def visualize(self):
         save_dir = './output/dataset'
         os.makedirs(save_dir, exist_ok=True)
+
+        all_subtypes = sorted(set([self.patient_dict[pid]['subtype'] for pid in self.patient_dict]))
         fold_stats = []
 
         for i, (train_pats, test_pats) in enumerate(self.folds):
-            pats = train_pats + test_pats
-            labels = [self.patient_dict[pid]['label'] for pid in pats]
-            label_counts = Counter(labels)
+            # Add validation split
+            train_only, val_pats = self._subtype_stratified_split(train_pats, self.validation_split)
+            sets = {'Train': train_only, 'Val': val_pats, 'Test': test_pats}
 
-            mag_counts = {m: sum(len(self.patient_dict[pid]['images'].get(m, [])) for pid in pats) for m in self.magnifications}
-            fold_stats.append({
-                "fold": i,
-                "benign": label_counts[0],
-                "malignant": label_counts[1],
-                "mag_counts": mag_counts
-            })
+            set_stats = {}
+            for name, pats in sets.items():
+                labels = [self.patient_dict[pid]['label'] for pid in pats]
+                subtypes = [self.patient_dict[pid]['subtype'] for pid in pats]
+                mag_counts = {m: sum(len(self.patient_dict[pid]['images'].get(m, [])) for pid in pats) for m in self.magnifications}
+                set_stats[name] = {
+                    'benign': labels.count(0),
+                    'malignant': labels.count(1),
+                    'benign_pct': round(labels.count(0)/len(pats)*100,1) if pats else 0,
+                    'subtype_counts': {st: subtypes.count(st) for st in all_subtypes},
+                    'mag_counts': mag_counts
+                }
+            fold_stats.append(set_stats)
 
-        # Class distribution
-        plt.figure(figsize=(8, 5))
-        benign = [fs["benign"] for fs in fold_stats]
-        malignant = [fs["malignant"] for fs in fold_stats]
-        plt.bar(range(len(fold_stats)), benign, label="Benign", color="skyblue")
-        plt.bar(range(len(fold_stats)), malignant, bottom=benign, label="Malignant", color="salmon")
-        plt.xticks(range(len(fold_stats)), [f"Fold {fs['fold']}" for fs in fold_stats])
-        plt.ylabel("Patients")
-        plt.title("Class Distribution per Fold")
-        plt.legend()
+        # --- 1. Benign vs Malignant per fold (percentages) ---
+        plt.figure(figsize=(8,5))
+        test_benign_pct = [fs['Test']['benign_pct'] for fs in fold_stats]
+        plt.bar(range(len(fold_stats)), test_benign_pct, color="skyblue", label="Benign % (Test)")
+        plt.xticks(range(len(fold_stats)), [f"Fold {i}" for i in range(len(fold_stats))])
+        plt.ylabel("Benign %")
+        plt.title("Benign vs Malignant Ratio in Test Sets")
+        plt.ylim(0, 100)
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, "class_distribution_per_fold.png"))
+        plt.savefig(os.path.join(save_dir, "benign_malignant_ratio_test.png"))
         plt.close()
 
-        # Per-magnification counts
-        plt.figure(figsize=(10, 6))
+        # --- 2. Subtype distribution per fold (stacked) ---
+        subtype_colors = plt.cm.get_cmap('tab20', len(all_subtypes))
+        fig, ax = plt.subplots(figsize=(10,6))
+        bottom = [0]*len(fold_stats)
+        for idx, subtype in enumerate(all_subtypes):
+            values = [fs['Test']['subtype_counts'][subtype] for fs in fold_stats]
+            ax.bar(range(len(fold_stats)), values, bottom=bottom, label=subtype, color=subtype_colors(idx))
+            bottom = [b+v for b,v in zip(bottom, values)]
+        ax.set_xticks(range(len(fold_stats)))
+        ax.set_xticklabels([f"Fold {i}" for i in range(len(fold_stats))])
+        ax.set_ylabel("Patients")
+        ax.set_title("Subtype Distribution in Test Sets")
+        ax.legend(bbox_to_anchor=(1.05,1), loc='upper left')
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "subtype_distribution_test.png"))
+        plt.close()
+
+        # --- 3. Magnification counts (Train vs Test) ---
+        plt.figure(figsize=(10,6))
         for m in self.magnifications:
-            plt.plot(range(len(fold_stats)), [fs["mag_counts"][m] for fs in fold_stats], marker='o', label=f"{m}X")
-        plt.xticks(range(len(fold_stats)), [f"Fold {fs['fold']}" for fs in fold_stats])
+            plt.plot(range(len(fold_stats)), [fs['Train']['mag_counts'][m] for fs in fold_stats], marker='o', label=f"{m}X (Train)")
+            plt.plot(range(len(fold_stats)), [fs['Test']['mag_counts'][m] for fs in fold_stats], marker='x', linestyle='--', label=f"{m}X (Test)")
+        plt.xticks(range(len(fold_stats)), [f"Fold {i}" for i in range(len(fold_stats))])
         plt.ylabel("Image Count")
-        plt.title("Magnification-wise Image Counts per Fold")
+        plt.title("Magnification-wise Image Counts per Fold (Train vs Test)")
         plt.legend()
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, "magnification_counts_per_fold.png"))
+        plt.savefig(os.path.join(save_dir, "magnification_counts_train_test.png"))
         plt.close()
 
-        print(f"Saved visualizations to {save_dir}")
+        print(f"Saved detailed visualizations to {save_dir}")
