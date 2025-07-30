@@ -92,8 +92,8 @@ def main():
         print(f"Patients with full 4 mags: {sum(1 for p in train_pats if sum(len(train_ds.patient_dict[p]['images'][m]) > 0 for m in ['40','100','200','400']) == 4)}")
 
         samples_per_epoch = train_stats['total_samples_per_epoch']
-        # Dynamic batch size adjustment for MAXIMUM utilization Ensure batch size doesn't exceed reasonable limits for stability
-        effective_batch_size = min(max(16, samples_per_epoch // 200), 32)
+        # Dynamic batch size adjustment for MAXIMUM utilization with lightweight model
+        effective_batch_size = min(max(32, samples_per_epoch // 150), 64)  # Increased limits for better GPU utilization
         print(f"Inner training samples: {samples_per_epoch}, batch size: {effective_batch_size}")
         
         sampler = train_ds.get_class_balanced_sampler()
@@ -102,16 +102,19 @@ def main():
             sampler=sampler if sampler else None,
             shuffle=(sampler is None),
             num_workers=config['num_workers'], pin_memory=config['pin_memory'],
+            persistent_workers=config.get('persistent_workers', False),
             drop_last=True
         )
         
         test_loader = DataLoader(
             test_ds, batch_size=config['batch_size'], shuffle=False, 
-            num_workers=config['num_workers'], pin_memory=config['pin_memory']
+            num_workers=config['num_workers'], pin_memory=config['pin_memory'],
+            persistent_workers=config.get('persistent_workers', False)
         )
         val_loader = DataLoader(
             val_ds, batch_size=config['batch_size'], shuffle=False, 
-            num_workers=config['num_workers'], pin_memory=config['pin_memory']
+            num_workers=config['num_workers'], pin_memory=config['pin_memory'],
+            persistent_workers=config.get('persistent_workers', False)
         )
 
         train_labels = [train_ds.patient_dict[pid]['label'] for pid in train_pats]

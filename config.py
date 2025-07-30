@@ -20,8 +20,8 @@ EARLY_STOPPING_PATIENCE = 7  # Restored to original for stable training
 LR_SCHEDULER_PATIENCE = 3
 LR_SCHEDULER_FACTOR = 0.5
 
-# Gradient accumulation for effective larger batch sizes
-GRADIENT_ACCUMULATION_STEPS = 2  # Effective batch size = 16 * 2 = 32
+# Gradient accumulation for effective larger batch sizes  
+GRADIENT_ACCUMULATION_STEPS = 1  # Batch size = 32, no accumulation needed (was 2)
 
 # Enhanced regularization settings for balanced utilization
 DROPOUT_RATE = 0.75  # Increased to prevent overfitting with more data
@@ -204,8 +204,8 @@ def get_training_config():
     device = get_device()
     
     if device.type == 'cuda':
-        batch_size = 16
-        num_workers = 8
+        batch_size = 32  # Increased from 16 - better GPU utilization
+        num_workers = 12  # Increased from 8 - faster data loading  
         environment = 'cuda'
     elif device.type == 'mps':
         batch_size = 8
@@ -230,5 +230,6 @@ def get_training_config():
         'num_epochs': NUM_EPOCHS,
         'random_seed': RANDOM_SEED,
         'pin_memory': True if device.type == 'cuda' else False,
+        'persistent_workers': True if device.type == 'cuda' and num_workers > 0 else False,
         'output_dir': OUTPUT_DIR
     }
