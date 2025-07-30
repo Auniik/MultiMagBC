@@ -204,8 +204,8 @@ def get_training_config():
     device = get_device()
     
     if device.type == 'cuda':
-        batch_size = 32  # Increased from 16 - better GPU utilization
-        num_workers = 16  # Increased for high-end GPUs like 4090
+        batch_size = 64  # Optimized for 4090 based on benchmark results
+        num_workers = 16  # Optimal for high-end GPUs
         environment = 'cuda'
     elif device.type == 'mps':
         batch_size = 8

@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader
 
 
 from preprocess.multimagset import MultiMagPatientDataset
-from preprocess.preprocess import get_transforms, get_mixup_fn
+from preprocess.preprocess_light import get_fast_transforms as get_transforms, get_mixup_fn
 from training.train_mm_k_fold import eval_model, eval_model_with_threshold_optimization, train_one_epoch
 from sklearn.model_selection import train_test_split
 
@@ -92,8 +92,8 @@ def main():
         print(f"Patients with full 4 mags: {sum(1 for p in train_pats if sum(len(train_ds.patient_dict[p]['images'][m]) > 0 for m in ['40','100','200','400']) == 4)}")
 
         samples_per_epoch = train_stats['total_samples_per_epoch']
-        # Dynamic batch size adjustment for MAXIMUM utilization with lightweight model
-        effective_batch_size = min(max(32, samples_per_epoch // 150), 64)  # Increased limits for better GPU utilization
+        # Use optimal batch size from benchmark results (64 for 4090)
+        effective_batch_size = config['batch_size']  # Use benchmarked optimal size
         print(f"Inner training samples: {samples_per_epoch}, batch size: {effective_batch_size}")
         
         sampler = train_ds.get_class_balanced_sampler()
