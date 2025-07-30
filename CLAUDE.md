@@ -37,10 +37,6 @@ python eval.py --magnitude
 ### Core Components
 
 1. **Model Architecture** (`backbones/our/model.py`):
-   - `MMNet`: Main multi-magnification network with attention mechanisms
-   - `HybridCrossMagFusion`: Cross-magnification fusion with attention
-   - `MultiScaleAttentionPool`: Spatial attention pooling
-
 2. **Data Pipeline** (`preprocess/`):
    - `MultiMagPatientDataset`: Handles multi-magnification patient data with sampling strategies
    - `PatientWiseKFoldSplitter`: Patient-wise k-fold splitting to prevent data leakage
@@ -48,8 +44,6 @@ python eval.py --magnitude
 
 3. **Training Pipeline** (`training/`):
    - `train_mm_k_fold.py`: Training functions with mixup, threshold optimization
-   - `train_single_mag.py`: Single magnification baseline training
-   - `ensemble_utils.py`: Ensemble methods for multiple models
 
 4. **Configuration** (`config.py`):
    - Centralized configuration including hyperparameters, loss functions, data paths
@@ -61,7 +55,7 @@ python eval.py --magnitude
 - **Multi-magnification Processing**: Processes 4 different magnifications simultaneously
 - **Patient-wise Cross-validation**: Ensures no patient data leakage between folds
 - **Attention Mechanisms**: Hierarchical magnification attention and cross-magnification fusion
-- **Class Balancing**: Handles imbalanced dataset with focal loss and weighted sampling
+- **Class Balancing**: Handles imbalanced dataset 
 - **Mixed Precision Training**: Uses AMP for faster training and lower memory usage
 - **Threshold Optimization**: Automatically finds optimal classification threshold per fold
 
@@ -110,7 +104,4 @@ The project uses `utils/env.py` to handle different environments (local vs runpo
 
 - Image size: 224x224
 - Batch size: Automatically adjusted based on device (16 for CUDA, 8 for MPS, 4 for CPU)
-- Learning rate: 1e-4 with ReduceLROnPlateau scheduler
-- Early stopping patience: 7 epochs
-- Dropout rate: 0.75 for regularization
-- Focal loss: α=0.5, γ=3.0 for class imbalance
+- Learning rate,  Early stopping patience, Dropout rate: 0.75, Focal loss from config.py
